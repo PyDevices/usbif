@@ -281,11 +281,11 @@ bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received,
     (void)ep_out;
     (void)cur_alt_setting;
 
-    // Not while the C pump is running. tud_audio_read() has one consumer by
-    // design, and a safety net that reads the same FIFO becomes a second one:
-    // it shed 371 blocks out from under the pump and cut throughput to 41%,
-    // which is worse than the problem it exists to prevent. The pump is a
-    // consumer, so the "nobody is draining this" case does not apply.
+    // Only when no C pump exists. tud_audio_read() has one consumer by design,
+    // and this guard reading the same FIFO makes a second one -- it shed 371
+    // blocks out from under the pump and halved throughput. The pump therefore
+    // carries its own overflow guard, in its own loop, and this one covers the
+    // case where the only consumer is Python or there is none at all.
     if (!usbif_pump_is_running() && tud_audio_available() > USBIF_UAC_HIGH_WATER) {
         static uint8_t sink[64];
         usbif_uac_overflows++;

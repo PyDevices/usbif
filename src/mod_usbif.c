@@ -175,7 +175,7 @@ extern int usbif_pump_start(int i2s_id, int bclk, int ws, int dout,
     uint32_t rate, int bits, int channels);
 extern void usbif_pump_stop(void);
 extern bool usbif_pump_is_running(void);
-extern uint32_t usbif_pump_bytes, usbif_pump_idle, usbif_pump_timeouts;
+extern uint32_t usbif_pump_bytes, usbif_pump_idle, usbif_pump_timeouts, usbif_pump_shed;
 #endif
 
 // Diagnostic: what the host has actually asked the audio function for.
@@ -315,13 +315,14 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_pump_stop_obj, usbif_uac_pump_stop);
 // (running, bytes moved, idle polls, sink timeouts)
 static mp_obj_t usbif_uac_pump_stats(void) {
     #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
-    mp_obj_t items[4] = {
+    mp_obj_t items[5] = {
         mp_obj_new_bool(usbif_pump_is_running()),
         mp_obj_new_int_from_uint(usbif_pump_bytes),
         mp_obj_new_int_from_uint(usbif_pump_idle),
         mp_obj_new_int_from_uint(usbif_pump_timeouts),
+        mp_obj_new_int_from_uint(usbif_pump_shed),
     };
-    return mp_obj_new_tuple(4, items);
+    return mp_obj_new_tuple(5, items);
     #else
     return mp_const_none;
     #endif

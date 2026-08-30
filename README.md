@@ -15,20 +15,32 @@ application written against it runs unchanged on a workstation.
 
 ## Status: early development
 
-**Phase 1 of 8. Nothing is released, and no USB class works yet.** What exists
-today is the foundation the rest is built on:
+**Nothing is released. One class works: the board can be a USB sound card.**
 
-- the portable API and its Linux desktop backend, in `pydevices` (`lib/usbif`),
-  with a conformance suite that runs against every backend
+An ESP32-P4 running this enumerates on a PC as a class-compliant USB Audio
+device — no driver installed — alongside its CDC REPL on the same connector,
+plays audio out of the board's codec, and is **opt-in**: at boot the board is
+a plain CDC device, and the audio function appears only when Python asks for
+it. A host cannot be wedged by a board nobody is pumping.
+
+```python
+import usbif, _usbif
+_usbif.uac_enable(True)          # advertise the audio function; re-enumerates
+_usbif.uac_pump_start(bclk, ws, dout, rate=24000, bits=16, channels=1)
+```
+
+Also working, and the foundation the rest builds on:
+
+- the portable API and its Linux and Windows desktop backends, in `pydevices`
+  (`lib/usbif`), with one conformance suite run against every backend
 - the event transport in C (`src/shared/usbif_ringbuf.c`), with host-side tests
-- a `tusb_config.h` extension hook (`patches/`) proven to compile TinyUSB's
-  UAC driver into MicroPython's own TinyUSB instance
-- this module, building into ESP32 firmware and reporting an honest empty
-  capability set
+- three small patches to MicroPython (`patches/`), each with provenance: a
+  `tusb_config.h` hook, a configuration-descriptor hook, and two weak hooks
+  that let this module vary what it advertises at runtime
 
-Host classes (HID, MSC, CDC) arrive in Phase 2; MIDI in Phase 3; the UAC sound
-card — the flagship — in Phase 4. The plan and its evidence are in
-[`docs/`](docs/).
+**Not yet working:** USB host of any kind (HID, MSC, CDC-ACM), MIDI in either
+direction, and UVC. Host work is next and needs OTG adapters. The plan and the
+evidence behind every decision are in [`docs/`](docs/).
 
 ## Why the events are drained rather than delivered
 

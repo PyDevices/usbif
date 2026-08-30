@@ -41,8 +41,24 @@
 // Above MicroPython's task so audio is not held up by whatever the
 // interpreter is doing, and below TinyUSB's so servicing the endpoint always
 // wins over draining it.
+// Short: a long block here is the failure mode, not a safety margin. While
+// the pump waits on the sink it is not reading the USB FIFO, and a FIFO that
+// fills throttles the host through the feedback endpoint until its audio
+// engine stalls -- which on Windows backs up the desktop. Realtime audio is
+// better dropped than queued, so the write gets one poll interval and no more.
+#define USBIF_PUMP_WRITE_TIMEOUT_MS (10)
+
 #define USBIF_PUMP_TASK_PRIO (10)
 #define USBIF_PUMP_TASK_STACK (4096)
+
+// The host's format and the board's need not match, and increasingly should
+// not: a sound card is expected to present 48 kHz stereo, while this board's
+// codec path runs 24 kHz mono. Converting here -- in the pump, in C -- is what
+// lets the USB side look conventional to the host without dictating what the
+// hardware does. Set by usbif_pump_start() from what the caller asks for
+// against what the descriptor advertises.
+static uint8_t usbif_src_channels = 2;
+static uint8_t usbif_decimate = 1;      // take 1 of every N frames
 
 static i2s_chan_handle_t usbif_i2s_tx;
 static TaskHandle_t usbif_pump_task_handle;
@@ -51,12 +67,29 @@ static volatile bool usbif_pump_running;
 uint32_t usbif_pump_bytes;
 uint32_t usbif_pump_idle;
 uint32_t usbif_pump_timeouts;
+uint32_t usbif_pump_shed;
+
+#define USBIF_PUMP_HIGH_WATER (CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ * 3 / 4)
 
 static void usbif_pump_task(void *arg) {
     (void)arg;
     static uint8_t block[USBIF_PUMP_BLOCK];
 
     while (usbif_pump_running) {
+        // Shed here rather than in the USB callback. tud_audio_read() has one
+        // consumer by design, so the overflow guard has to live wherever the
+        // reading happens -- putting it in the callback made it a second
+        // consumer and it stole blocks from this loop. Doing it here keeps one
+        // reader and still protects the host when the sink cannot keep up.
+        if (tud_audio_available() > USBIF_PUMP_HIGH_WATER) {
+            usbif_pump_shed++;
+            while (tud_audio_available() > USBIF_PUMP_HIGH_WATER / 2) {
+                if (!tud_audio_read(block, sizeof(block))) {
+                    break;
+                }
+            }
+        }
+
         uint16_t count = tud_audio_read(block, sizeof(block));
         if (count == 0) {
             // Nothing buffered: the host is not streaming, or has not filled a
@@ -67,9 +100,33 @@ static void usbif_pump_task(void *arg) {
             vTaskDelay(1);
             continue;
         }
+        // Convert in place: stereo to mono by averaging, and drop frames to
+        // divide the rate. Both shrink the buffer, so writing over the front
+        // of it as we read forward is safe.
+        uint16_t out_bytes = count;
+        if (usbif_src_channels == 2 || usbif_decimate > 1) {
+            const int16_t *in = (const int16_t *)(void *)block;
+            int16_t *out = (int16_t *)(void *)block;
+            const uint16_t frames = count / (2 * usbif_src_channels);
+            uint16_t kept = 0;
+            for (uint16_t f = 0; f < frames; f += usbif_decimate) {
+                int32_t sample;
+                if (usbif_src_channels == 2) {
+                    // Average rather than take one side: a mono sink fed only
+                    // the left channel loses anything panned right, which on
+                    // real music is most of it.
+                    sample = ((int32_t)in[f * 2] + (int32_t)in[f * 2 + 1]) / 2;
+                } else {
+                    sample = in[f];
+                }
+                out[kept++] = (int16_t)sample;
+            }
+            out_bytes = kept * 2;
+        }
+
         size_t written = 0;
-        esp_err_t err = i2s_channel_write(usbif_i2s_tx, block, count, &written,
-            pdMS_TO_TICKS(100));
+        esp_err_t err = i2s_channel_write(usbif_i2s_tx, block, out_bytes, &written,
+            pdMS_TO_TICKS(USBIF_PUMP_WRITE_TIMEOUT_MS));
         if (err == ESP_ERR_TIMEOUT) {
             // The sink is not draining. Dropping is right: this is realtime
             // audio, and stale samples are worth less than the next ones.
@@ -144,9 +201,17 @@ int usbif_pump_start(int i2s_id, int bclk, int ws, int dout,
         return err;
     }
 
+    // What the host sends versus what the sink takes.
+    usbif_src_channels = (uint8_t)(CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX);
+    usbif_decimate = (uint8_t)(rate ? (CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE / rate) : 1);
+    if (usbif_decimate < 1) {
+        usbif_decimate = 1;
+    }
+
     usbif_pump_bytes = 0;
     usbif_pump_idle = 0;
     usbif_pump_timeouts = 0;
+    usbif_pump_shed = 0;
     usbif_pump_running = true;
 
     if (xTaskCreate(usbif_pump_task, "usbif_uac", USBIF_PUMP_TASK_STACK, NULL,
