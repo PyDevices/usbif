@@ -25,6 +25,9 @@
 // and then cannot start. That cost two wrong hypotheses to find.
 #if MICROPY_HW_ENABLE_USBDEV
 #include "tusb.h"
+#include "mp_usbd.h"
+#include "py/mphal.h"
+#include <string.h>
 #endif
 
 #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
@@ -44,13 +47,70 @@ static bool usbif_uac_streaming;
 // audio function is whether the class driver is being asked anything at all:
 // a descriptor the host dislikes and a driver that never bound look identical
 // from outside, and they need opposite fixes.
+// Whether the audio function is advertised at all. Default off: a board that
+// always enumerates as a sound card is not merely untidy. A host will happily
+// make it the default output, route system audio to it, and then stall its
+// audio engine when nothing aboard is draining the stream -- observed on
+// Windows as the whole desktop backing up, keyboard included.
+static bool usbif_uac_enabled;
+
 uint32_t usbif_uac_get_reqs;
 uint32_t usbif_uac_set_reqs;
 uint32_t usbif_uac_itf_sets;
 uint32_t usbif_uac_unhandled;
+uint32_t usbif_uac_overflows;
 
 bool usbif_uac_is_streaming(void) {
     return usbif_uac_streaming;
+}
+
+bool usbif_uac_is_enabled(void) {
+    return usbif_uac_enabled;
+}
+
+void usbif_uac_note_read(void) {
+}
+
+// The built-in configuration descriptor, with the audio function present or
+// absent. The enabled form is the compile-time one; the disabled form is its
+// prefix with two fields corrected, which avoids keeping a second descriptor
+// in step with the first by hand.
+static uint8_t usbif_desc_buf[MP_USBD_BUILTIN_DESC_CFG_LEN];
+
+#define USBIF_DESC_LEN_WITHOUT_AUDIO \
+    (MP_USBD_BUILTIN_DESC_CFG_LEN - MICROPY_HW_USB_EXT_DESC_CFG_LEN)
+
+const uint8_t *mp_usbd_builtin_desc_cfg_get(void) {
+    if (usbif_uac_enabled) {
+        return mp_usbd_builtin_desc_cfg;
+    }
+    memcpy(usbif_desc_buf, mp_usbd_builtin_desc_cfg, USBIF_DESC_LEN_WITHOUT_AUDIO);
+    // wTotalLength and bNumInterfaces, at their fixed offsets in the
+    // configuration descriptor (USB 2.0 table 9-10).
+    usbif_desc_buf[2] = (uint8_t)(USBIF_DESC_LEN_WITHOUT_AUDIO & 0xFF);
+    usbif_desc_buf[3] = (uint8_t)(USBIF_DESC_LEN_WITHOUT_AUDIO >> 8);
+    usbif_desc_buf[4] = (uint8_t)USBD_ITF_AUDIO;
+    return usbif_desc_buf;
+}
+
+// Must track the descriptor: runtime_dev_open() uses this to decide which
+// interfaces belong to built-in drivers, and a bound that disagrees with the
+// descriptor leaves an interface claimed by nobody.
+uint8_t mp_usbd_builtin_itf_max(void) {
+    return usbif_uac_enabled ? USBD_ITF_BUILTIN_MAX : (uint8_t)USBD_ITF_AUDIO;
+}
+
+// Re-enumerate so the host re-reads the configuration. USB has no way to
+// change identity in place; a detach and re-attach is the mechanism.
+void usbif_uac_set_enabled(bool enable) {
+    if (enable == usbif_uac_enabled) {
+        return;
+    }
+    usbif_uac_enabled = enable;
+    usbif_uac_streaming = false;
+    tud_disconnect();
+    mp_hal_delay_ms(120);
+    tud_connect();
 }
 
 uint32_t usbif_uac_current_rate(void) {
@@ -197,6 +257,40 @@ bool tud_audio_set_itf_close_EP_cb(uint8_t rhport, tusb_control_request_t const 
 // Explicit feedback: the host's clock and ours are independent, so the device
 // reports how fast it is actually consuming samples and the host adjusts. FIFO
 // counting is TinyUSB's simplest method and needs no timer capture hardware.
+// Called after each received packet. If nothing is draining the FIFO it fills,
+// the FIFO-count feedback tells the host to slow down, and the host ends up
+// waiting on a device that will never catch up -- which on Windows stalled the
+// audio engine badly enough to back up the whole desktop.
+//
+// The trigger is a high-water mark rather than a "no consumer for N ms" timer.
+// A timer deadlocks against any consumer that batches: draining on a timeout
+// keeps the FIFO empty, a consumer waiting for a 20 ms block never sees one,
+// so it never reads, so the timeout never clears. (Observed: the pump moved
+// exactly zero bytes.) A high-water mark cannot deadlock -- it does nothing
+// at all while a consumer keeps up, whatever its block size, and only sheds
+// samples that were never going to be played.
+#define USBIF_UAC_HIGH_WATER (CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ * 3 / 4)
+
+bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received,
+    uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting) {
+    (void)rhport;
+    (void)n_bytes_received;
+    (void)func_id;
+    (void)ep_out;
+    (void)cur_alt_setting;
+
+    if (tud_audio_available() > USBIF_UAC_HIGH_WATER) {
+        static uint8_t sink[64];
+        usbif_uac_overflows++;
+        while (tud_audio_available() > USBIF_UAC_HIGH_WATER / 2) {
+            if (!tud_audio_read(sink, sizeof(sink))) {
+                break;
+            }
+        }
+    }
+    return true;
+}
+
 void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt_itf,
     audio_feedback_params_t *feedback_param) {
     (void)func_id;

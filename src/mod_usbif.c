@@ -163,24 +163,29 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_builtin_desc_cfg_obj, usbif_builtin_desc_
 
 #if CFG_TUD_AUDIO
 extern uint32_t usbif_uac_get_reqs, usbif_uac_set_reqs, usbif_uac_itf_sets, usbif_uac_unhandled;
+extern uint32_t usbif_uac_overflows;
 extern bool usbif_uac_is_streaming(void);
 extern uint32_t usbif_uac_current_rate(void);
 extern bool usbif_uac_is_muted(void);
 extern int usbif_uac_volume_db256(void);
+extern bool usbif_uac_is_enabled(void);
+extern void usbif_uac_set_enabled(bool enable);
+extern void usbif_uac_note_read(void);
 #endif
 
 // Diagnostic: what the host has actually asked the audio function for.
 static mp_obj_t usbif_uac_stats(void) {
     #if CFG_TUD_AUDIO
-    mp_obj_t items[6] = {
+    mp_obj_t items[7] = {
         mp_obj_new_int_from_uint(usbif_uac_get_reqs),
         mp_obj_new_int_from_uint(usbif_uac_set_reqs),
         mp_obj_new_int_from_uint(usbif_uac_itf_sets),
         mp_obj_new_int_from_uint(usbif_uac_unhandled),
         mp_obj_new_bool(usbif_uac_is_streaming()),
         mp_obj_new_int_from_uint(usbif_uac_current_rate()),
+        mp_obj_new_int_from_uint(usbif_uac_overflows),
     };
-    return mp_obj_new_tuple(6, items);
+    return mp_obj_new_tuple(7, items);
     #else
     return mp_const_none;
     #endif
@@ -210,6 +215,8 @@ static mp_obj_t usbif_uac_read(mp_obj_t buf_in) {
     #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
     mp_buffer_info_t buf;
     mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_WRITE);
+    // Records that a consumer is alive, so the C side stops discarding.
+    usbif_uac_note_read();
     uint16_t count = tud_audio_read(buf.buf, (uint16_t)MIN(buf.len, UINT16_MAX));
     return mp_obj_new_int_from_uint(count);
     #else
@@ -235,7 +242,24 @@ static mp_obj_t usbif_uac_volume(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_volume_obj, usbif_uac_volume);
 
+// Advertise the audio function to the host, or stop advertising it. The board
+// re-enumerates either way -- USB has no way to change identity in place.
+static mp_obj_t usbif_uac_enable(size_t n_args, const mp_obj_t *args) {
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    if (n_args) {
+        usbif_uac_set_enabled(mp_obj_is_true(args[0]));
+    }
+    return mp_obj_new_bool(usbif_uac_is_enabled());
+    #else
+    (void)n_args;
+    (void)args;
+    return mp_const_false;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_uac_enable_obj, 0, 1, usbif_uac_enable);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_uac_enable), MP_ROM_PTR(&usbif_uac_enable_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_available), MP_ROM_PTR(&usbif_uac_available_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_volume), MP_ROM_PTR(&usbif_uac_volume_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_read), MP_ROM_PTR(&usbif_uac_read_obj) },
