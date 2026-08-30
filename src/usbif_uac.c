@@ -310,7 +310,20 @@ void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt_itf,
     audio_feedback_params_t *feedback_param) {
     (void)func_id;
     (void)alt_itf;
-    feedback_param->method = AUDIO_FEEDBACK_METHOD_FIFO_COUNT;
+    // No feedback data: the host transmits at nominal rate. This is deliberate
+    // and measured, not an omission. AUDIO_FEEDBACK_METHOD_FIFO_COUNT regulates
+    // the FIFO toward half-full, but the C pump drains the FIFO the moment
+    // anything lands, so the level the regulator samples is set by sampling
+    // phase and pump latency, not by the host's rate. Hunting for an
+    // unreachable equilibrium, it asked the host for ~4% less than nominal
+    // (23,030 Hz of 24,000 at the codec -- heard as drag and skipping). With
+    // feedback disabled: 23,960 Hz, zero overflows, zero sink timeouts over an
+    // 88.9 s window. The feedback EP stays advertised and silent -- TinyUSB's
+    // own default when this callback is not defined, and hosts fall back to
+    // nominal rate. Honest device-computed feedback (a slow integrator on the
+    // FIFO trend, via tud_audio_fb_set) is future work; see
+    // docs/phase0-findings.md for the full account.
+    feedback_param->method = AUDIO_FEEDBACK_METHOD_DISABLED;
     feedback_param->sample_freq = usbif_uac_sample_rate;
 }
 
