@@ -14,6 +14,7 @@
 
 #include "py/runtime.h"
 #include "py/obj.h"
+#include "py/mperrno.h"
 
 #include "shared/usbif_ringbuf.h"
 
@@ -22,16 +23,23 @@
 #include "mp_usbd.h"
 #endif
 
-// Class bitmask, mirroring the names in the portable Python API. A bitmask
-// rather than strings so an event record stays fixed-size and ISR-safe; the
-// translation to names happens here, on the consumer side, where allocation
-// is allowed.
-#define USBIF_CLASS_HID  (1u << 0)
-#define USBIF_CLASS_MSC  (1u << 1)
-#define USBIF_CLASS_CDC  (1u << 2)
-#define USBIF_CLASS_MIDI (1u << 3)
-#define USBIF_CLASS_UAC  (1u << 4)
-#define USBIF_CLASS_UVC  (1u << 5)
+#include "usbif_classes.h"
+
+// Host engine availability: the IDF USB Host Library, on chips with an OTG
+// controller. The same gate guards usbif_host.c; elsewhere the host_* calls
+// keep their Phase-1 stub behaviour (an honest empty capability set).
+#if defined(ESP_PLATFORM)
+#include "sdkconfig.h"
+#endif
+#if defined(ESP_PLATFORM) && defined(CONFIG_SOC_USB_OTG_SUPPORTED) && CONFIG_SOC_USB_OTG_SUPPORTED
+#define USBIF_HAVE_HOST (1)
+extern int usbif_host_start_c(void);
+extern void usbif_host_stop_c(void);
+extern bool usbif_host_is_running(void);
+extern int usbif_host_snapshot(usbif_event_t *out, int max);
+#else
+#define USBIF_HAVE_HOST (0)
+#endif
 
 // Event capacity. Sized from measurement rather than a round number: the worst
 // VM stall observed on an ESP32-S3 was 1537 ms during flash writes, and a
@@ -44,6 +52,12 @@
 static usbif_event_t usbif_event_slots[USBIF_EVENT_CAPACITY];
 static usbif_ringbuf_t usbif_events;
 static bool usbif_host_running = false;
+
+// Producer hook for the host engine (usbif_host.c). Called only from the
+// host task, preserving the ring's single-producer contract.
+void usbif_host_emit(const usbif_event_t *event) {
+    usbif_rb_push(&usbif_events, event);
+}
 
 static const struct {
     uint16_t bit;
@@ -101,21 +115,40 @@ static mp_obj_t usbif_device_row(const usbif_event_t *event) {
 }
 
 static mp_obj_t usbif_host_start(mp_obj_t classes_in) {
-    (void)classes_in;  // honoured once class drivers exist (Phase 2)
+    (void)classes_in;  // honoured once class drivers exist
     usbif_rb_init(&usbif_events, usbif_event_slots, USBIF_EVENT_CAPACITY);
+    #if USBIF_HAVE_HOST
+    int err = usbif_host_start_c();
+    if (err != 0) {
+        mp_raise_OSError(err > 0 ? err : MP_EIO);
+    }
+    #endif
     usbif_host_running = true;
     return usbif_classes_to_set(usbif_supported_classes());
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(usbif_host_start_obj, usbif_host_start);
 
 static mp_obj_t usbif_host_stop(void) {
+    #if USBIF_HAVE_HOST
+    usbif_host_stop_c();
+    #endif
     usbif_host_running = false;
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_stop_obj, usbif_host_stop);
 
 static mp_obj_t usbif_host_devices(void) {
+    #if USBIF_HAVE_HOST
+    usbif_event_t rows[8];
+    int n = usbif_host_snapshot(rows, 8);
+    mp_obj_t items[8];
+    for (int i = 0; i < n; i++) {
+        items[i] = usbif_device_row(&rows[i]);
+    }
+    return mp_obj_new_tuple(n, items);
+    #else
     return mp_obj_new_tuple(0, NULL);
+    #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_devices_obj, usbif_host_devices);
 
