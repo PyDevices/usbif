@@ -185,7 +185,41 @@ static mp_obj_t usbif_uac_stats(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_stats_obj, usbif_uac_stats);
 
+// --- UAC playback: move received audio out of TinyUSB's FIFO.
+//
+// The isochronous endpoint itself is serviced entirely in C, on TinyUSB's
+// task, whatever Python is doing -- that is the whole point of the split.
+// What Python does here is move already-buffered blocks on to an audio sink,
+// a soft deadline governed by FIFO depth rather than a per-frame one.
+
+static mp_obj_t usbif_uac_available(void) {
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    return mp_obj_new_int_from_uint(tud_audio_available());
+    #else
+    return MP_OBJ_NEW_SMALL_INT(0);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_available_obj, usbif_uac_available);
+
+// Read up to len(buf) bytes of received PCM into a writable buffer, returning
+// the byte count. Returns 0 rather than blocking when the host is not
+// streaming, so a caller can poll it from an ordinary loop.
+static mp_obj_t usbif_uac_read(mp_obj_t buf_in) {
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_WRITE);
+    uint16_t count = tud_audio_read(buf.buf, (uint16_t)MIN(buf.len, UINT16_MAX));
+    return mp_obj_new_int_from_uint(count);
+    #else
+    (void)buf_in;
+    return MP_OBJ_NEW_SMALL_INT(0);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(usbif_uac_read_obj, usbif_uac_read);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_uac_available), MP_ROM_PTR(&usbif_uac_available_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uac_read), MP_ROM_PTR(&usbif_uac_read_obj) },
     { MP_ROM_QSTR(MP_QSTR_builtin_desc_cfg), MP_ROM_PTR(&usbif_builtin_desc_cfg_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_stats), MP_ROM_PTR(&usbif_uac_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR__usbif) },

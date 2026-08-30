@@ -54,7 +54,12 @@
 // count is a descriptor change once the path is proven.
 #define CFG_TUD_AUDIO_FUNC_1_DESC_LEN TUD_AUDIO_SPEAKER_MONO_FB_DESC_LEN
 #define CFG_TUD_AUDIO_ENABLE_FEEDBACK_FORMAT_CORRECTION (0)
-#define CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE (48000)
+// Matched to the board's existing I2S/codec path rather than the more usual
+// 48 kHz: the ES8311 on this board is already brought up mono 16-bit at
+// 24 kHz by board_peripherals, and a rate the two sides agree on removes
+// resampling from the first working version entirely. Hosts resample their
+// own output happily; a mismatch here would show up as wrong pitch.
+#define CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE (24000)
 #define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX (1)
 #define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX (2)
 #define CFG_TUD_AUDIO_FUNC_1_RESOLUTION_RX (16)
