@@ -24,15 +24,24 @@
 
 #include "py/mpconfig.h"
 
-#if defined(ESP_PLATFORM)
+// Usermod sources build with MicroPython's define set, not the IDF's, so
+// ESP_PLATFORM is NOT defined here -- learned the hard way when this gate
+// silently compiled the engine out and the Phase 1 stubs answered in its
+// place. sdkconfig.h existing (and naming an OTG controller) is the real
+// signal that the IDF host library is available.
+#if defined(__has_include)
+#if __has_include("sdkconfig.h")
 #include "sdkconfig.h"
 #endif
+#endif
 
-#if defined(ESP_PLATFORM) && defined(CONFIG_SOC_USB_OTG_SUPPORTED) && CONFIG_SOC_USB_OTG_SUPPORTED
+#if defined(CONFIG_SOC_USB_OTG_SUPPORTED) && CONFIG_SOC_USB_OTG_SUPPORTED
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"   // xTaskCreatePinnedToCore on IDF 5
 #include "esp_intr_alloc.h"
+#include "esp_cpu.h"
 #include "usb/usb_host.h"
 
 #include "shared/usbif_ringbuf.h"
@@ -55,7 +64,7 @@ extern void usbif_host_emit(const usbif_event_t *event);
 // audio -- and above MicroPython's task so events keep flowing while the
 // interpreter is busy, which is the transport's whole reason to exist.
 #define USBIF_HOST_TASK_PRIO (7)
-#define USBIF_HOST_TASK_STACK (4096)
+#define USBIF_HOST_TASK_STACK (8192)
 
 typedef struct {
     bool in_use;
@@ -203,8 +212,58 @@ static void usbif_host_client_cb(const usb_host_client_event_msg_t *msg, void *a
     }
 }
 
+// Rendezvous for the install that happens inside the task: the interrupt a
+// task allocates lands on the core that task runs on. MicroPython's own task
+// -- and therefore TinyUSB's boot-time allocation and everything a Python
+// call runs -- lives on core 1 (MP_TASK_COREID), and core 1 answered "No
+// free interrupt inputs for USB_OTG" even after tud_deinit freed the device
+// line. So the task is pinned to core 0 and does the install itself;
+// start_c waits here for the verdict. Teardown, including
+// usb_host_uninstall(), also runs in the task, because freeing an interrupt
+// belongs to the core that owns it.
+#define USBIF_HOST_INSTALL_PENDING (0x7FFFFFFF)
+static volatile int usbif_host_install_result = USBIF_HOST_INSTALL_PENDING;
+
 static void usbif_host_task(void *arg) {
     (void)arg;
+    printf("usbif_host: task up on core %d\n", esp_cpu_get_core_id());
+
+    usb_host_config_t config = {
+        // Levels 1-3: what TinyUSB's own esp32 glue requests for the same
+        // controller.
+        .intr_flags = ESP_INTR_FLAG_LOWMED,
+        // BIT1 = the HS controller, explicitly. The header says a map of 0
+        // defaults to the High-Speed peripheral on HS-capable targets; the
+        // code says `map == 0 ? BIT0` -- the FS controller, whose INT PHY
+        // belongs to USB-Serial-JTAG on this chip, which presents as
+        // "selected PHY is in use". BIT1 selects the controller on the
+        // connector and the UTMI PHY the device stack just released.
+        .peripheral_map = BIT1,
+    };
+    esp_err_t err = usb_host_install(&config);
+    printf("usbif_host: install -> 0x%x\n", (unsigned)err);
+    if (err == ESP_OK) {
+        usb_host_client_config_t client_config = {
+            .is_synchronous = false,
+            .max_num_event_msg = 8,
+            .async = {
+                .client_event_callback = usbif_host_client_cb,
+                .callback_arg = NULL,
+            },
+        };
+        err = usb_host_client_register(&client_config, &usbif_host_client);
+        printf("usbif_host: client register -> 0x%x\n", (unsigned)err);
+        if (err != ESP_OK) {
+            usb_host_uninstall();
+        }
+    }
+    usbif_host_install_result = (int)err;
+    if (err != ESP_OK) {
+        usbif_host_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
     // One task services both the library and the client. The library call
     // blocks up to a tick so the loop idles cheaply; the client call then
     // collects whatever that produced without waiting.
@@ -233,6 +292,7 @@ static void usbif_host_task(void *arg) {
             break;
         }
     }
+    usb_host_uninstall();
     usbif_host_task_handle = NULL;
     vTaskDelete(NULL);
 }
@@ -246,44 +306,49 @@ int usbif_host_start_c(void) {
     // Quiesce the device stack before touching the controller: disconnect so
     // an attached host sees a clean detach, deinit so the DWC interrupt is
     // freed, then release the device-mode PHY. The host library creates its
-    // own PHY in host mode when installed.
+    // own PHY in host mode when installed -- from inside the task, on core 1.
+    // TUD_OPT_RHPORT, not 0: on the ESP32-P4 TinyUSB numbers the FS
+    // controller port 0 and the HS controller -- the one on the connector,
+    // the one the device stack actually runs on -- port 1. tud_deinit(0)
+    // "succeeds" by early-returning on the uninitialized FS port, leaving
+    // the HS device ISR and controller fully alive, which then presents as
+    // "selected PHY is in use" and a phantom "No free interrupt inputs"
+    // (a claimed interrupt source reports as exhaustion). Cost of learning
+    // this: five builds.
     tud_disconnect();
-    tud_deinit(0);
+    tud_deinit(TUD_OPT_RHPORT);
     usb_phy_otg_release();
     #endif
 
-    usb_host_config_t config = {
-        .intr_flags = ESP_INTR_FLAG_LEVEL1,
-    };
-    esp_err_t err = usb_host_install(&config);
-    if (err != ESP_OK) {
-        return (int)err;
-    }
-
-    usb_host_client_config_t client_config = {
-        .is_synchronous = false,
-        .max_num_event_msg = 8,
-        .async = {
-            .client_event_callback = usbif_host_client_cb,
-            .callback_arg = NULL,
-        },
-    };
-    err = usb_host_client_register(&client_config, &usbif_host_client);
-    if (err != ESP_OK) {
-        usb_host_uninstall();
-        return (int)err;
-    }
-
+    usbif_host_install_result = USBIF_HOST_INSTALL_PENDING;
     usbif_host_task_running = true;
-    if (xTaskCreate(usbif_host_task, "usbif_host", USBIF_HOST_TASK_STACK, NULL,
-        USBIF_HOST_TASK_PRIO, &usbif_host_task_handle) != pdPASS) {
+    if (xTaskCreatePinnedToCore(usbif_host_task, "usbif_host",
+        USBIF_HOST_TASK_STACK, NULL, USBIF_HOST_TASK_PRIO,
+        &usbif_host_task_handle, 0) != pdPASS) {
         usbif_host_task_running = false;
-        usb_host_client_deregister(usbif_host_client);
-        usbif_host_client = NULL;
-        usb_host_uninstall();
-        return -1;
+        goto restore_device;
     }
-    return 0;
+    // Wait for the task's install verdict (it is quick; the timeout is a
+    // failsafe, not an expectation). vTaskDelay(1), not pdMS_TO_TICKS(5):
+    // this port ticks at 100 Hz, so five milliseconds rounds to ZERO ticks
+    // and a "delay" loop of yields burns out in microseconds -- the same
+    // trap usbif_i2s.c documents, stepped in again here. One tick is 10 ms;
+    // 200 of them bound the wait at two seconds.
+    for (int i = 0; i < 200 && usbif_host_install_result == USBIF_HOST_INSTALL_PENDING; i++) {
+        vTaskDelay(1);
+    }
+    if (usbif_host_install_result == ESP_OK) {
+        return 0;
+    }
+    usbif_host_task_running = false;
+
+restore_device:
+    #if MICROPY_HW_ENABLE_USBDEV
+    usb_phy_otg_device_mode();
+    tusb_init();
+    #endif
+    return usbif_host_install_result == USBIF_HOST_INSTALL_PENDING
+        ? -1 : usbif_host_install_result;
 }
 
 void usbif_host_stop_c(void) {
@@ -292,9 +357,10 @@ void usbif_host_stop_c(void) {
     }
     usbif_host_task_running = false;
     for (int i = 0; i < 200 && usbif_host_task_handle != NULL; i++) {
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(1);   // one 10 ms tick; pdMS_TO_TICKS(5) is ZERO ticks here
     }
-    usb_host_uninstall();
+    // The task uninstalled the library itself before exiting: the HCD
+    // interrupt lives on the task's core and is freed there.
 
     #if MICROPY_HW_ENABLE_USBDEV
     // Hand the controller back: device-mode PHY, then the TinyUSB device
@@ -304,8 +370,43 @@ void usbif_host_stop_c(void) {
     #endif
 }
 
+// Diagnostic: IDF's own per-core interrupt allocation table, to stdout.
+// The first question when "No free interrupt inputs" appears is which core
+// is full, of what, and whether a freed line actually returned to the pool.
+#include <stdio.h>
+void usbif_host_intr_dump(void) {
+    esp_intr_dump(stdout);
+}
+
 bool usbif_host_is_running(void) {
     return usbif_host_task_handle != NULL;
+}
+
+// The library's own view: how many devices and clients it currently tracks.
+// The first question when nothing attaches is whether the controller saw a
+// connection at all -- zero devices here across a replug means the root port
+// never detected one, which points at wiring, orientation or VBUS rather
+// than at enumeration.
+int usbif_host_lib_counts(int *num_devices, int *num_clients) {
+    usb_host_lib_info_t info;
+    if (usb_host_lib_info(&info) != ESP_OK) {
+        return -1;
+    }
+    *num_devices = info.num_devices;
+    *num_clients = info.num_clients;
+    return 0;
+}
+
+// Software replug: power-cycle the root port so connect detection starts
+// fresh, without anyone touching a cable.
+int usbif_host_port_cycle(void) {
+    if (usbif_host_task_handle == NULL) {
+        return -1;
+    }
+    usb_host_lib_set_root_port_power(false);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_err_t err = usb_host_lib_set_root_port_power(true);
+    return err == ESP_OK ? 0 : (int)err;
 }
 
 // Snapshot of currently attached devices, as ATTACH-shaped records. Read

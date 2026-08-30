@@ -28,15 +28,26 @@
 // Host engine availability: the IDF USB Host Library, on chips with an OTG
 // controller. The same gate guards usbif_host.c; elsewhere the host_* calls
 // keep their Phase-1 stub behaviour (an honest empty capability set).
-#if defined(ESP_PLATFORM)
+// Usermod sources build with MicroPython's define set, not the IDF's, so
+// ESP_PLATFORM is NOT defined here -- learned the hard way when this gate
+// silently compiled the engine out and the Phase 1 stubs answered in its
+// place. sdkconfig.h existing (and naming an OTG controller) is the real
+// signal that the IDF host library is available.
+#if defined(__has_include)
+#if __has_include("sdkconfig.h")
 #include "sdkconfig.h"
 #endif
-#if defined(ESP_PLATFORM) && defined(CONFIG_SOC_USB_OTG_SUPPORTED) && CONFIG_SOC_USB_OTG_SUPPORTED
+#endif
+#if defined(CONFIG_SOC_USB_OTG_SUPPORTED) && CONFIG_SOC_USB_OTG_SUPPORTED
 #define USBIF_HAVE_HOST (1)
 extern int usbif_host_start_c(void);
 extern void usbif_host_stop_c(void);
 extern bool usbif_host_is_running(void);
 extern int usbif_host_snapshot(usbif_event_t *out, int max);
+extern uint32_t usbif_host_attaches, usbif_host_detaches, usbif_host_errors;
+extern int usbif_host_lib_counts(int *num_devices, int *num_clients);
+extern int usbif_host_port_cycle(void);
+extern void usbif_host_intr_dump(void);
 #else
 #define USBIF_HAVE_HOST (0)
 #endif
@@ -377,6 +388,44 @@ static mp_obj_t usbif_uac_pump_stats(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_pump_stats_obj, usbif_uac_pump_stats);
 
+// Diagnostic: (running, attaches, detaches, errors, lib_devices, lib_clients).
+static mp_obj_t usbif_host_stats(void) {
+    #if USBIF_HAVE_HOST
+    int devs = -1, clients = -1;
+    usbif_host_lib_counts(&devs, &clients);
+    mp_obj_t items[6] = {
+        mp_obj_new_bool(usbif_host_is_running()),
+        mp_obj_new_int_from_uint(usbif_host_attaches),
+        mp_obj_new_int_from_uint(usbif_host_detaches),
+        mp_obj_new_int_from_uint(usbif_host_errors),
+        MP_OBJ_NEW_SMALL_INT(devs),
+        MP_OBJ_NEW_SMALL_INT(clients),
+    };
+    return mp_obj_new_tuple(6, items);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_stats_obj, usbif_host_stats);
+
+// Software replug: power-cycle the root port to force fresh connect detection.
+static mp_obj_t usbif_host_port_cycle_py(void) {
+    #if USBIF_HAVE_HOST
+    return MP_OBJ_NEW_SMALL_INT(usbif_host_port_cycle());
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_port_cycle_obj, usbif_host_port_cycle_py);
+
+static mp_obj_t usbif_host_intr_dump_py(void) {
+    #if USBIF_HAVE_HOST
+    usbif_host_intr_dump();
+    #endif
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_intr_dump_obj, usbif_host_intr_dump_py);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_uac_enable), MP_ROM_PTR(&usbif_uac_enable_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_start), MP_ROM_PTR(&usbif_uac_pump_start_obj) },
@@ -393,6 +442,9 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_stop), MP_ROM_PTR(&usbif_host_stop_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_devices), MP_ROM_PTR(&usbif_host_devices_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_drain), MP_ROM_PTR(&usbif_host_drain_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_stats), MP_ROM_PTR(&usbif_host_stats_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_port_cycle), MP_ROM_PTR(&usbif_host_port_cycle_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_intr_dump), MP_ROM_PTR(&usbif_host_intr_dump_obj) },
 };
 static MP_DEFINE_CONST_DICT(usbif_module_globals, usbif_module_globals_table);
 
