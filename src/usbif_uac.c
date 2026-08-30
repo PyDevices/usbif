@@ -32,6 +32,8 @@
 
 #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
 
+extern bool usbif_pump_is_running(void);
+
 #define USBIF_UAC_ENTITY_CLOCK (0x04)
 #define USBIF_UAC_ENTITY_FEATURE_UNIT (0x02)
 
@@ -279,7 +281,12 @@ bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received,
     (void)ep_out;
     (void)cur_alt_setting;
 
-    if (tud_audio_available() > USBIF_UAC_HIGH_WATER) {
+    // Not while the C pump is running. tud_audio_read() has one consumer by
+    // design, and a safety net that reads the same FIFO becomes a second one:
+    // it shed 371 blocks out from under the pump and cut throughput to 41%,
+    // which is worse than the problem it exists to prevent. The pump is a
+    // consumer, so the "nobody is draining this" case does not apply.
+    if (!usbif_pump_is_running() && tud_audio_available() > USBIF_UAC_HIGH_WATER) {
         static uint8_t sink[64];
         usbif_uac_overflows++;
         while (tud_audio_available() > USBIF_UAC_HIGH_WATER / 2) {

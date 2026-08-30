@@ -171,6 +171,11 @@ extern int usbif_uac_volume_db256(void);
 extern bool usbif_uac_is_enabled(void);
 extern void usbif_uac_set_enabled(bool enable);
 extern void usbif_uac_note_read(void);
+extern int usbif_pump_start(int i2s_id, int bclk, int ws, int dout,
+    uint32_t rate, int bits, int channels);
+extern void usbif_pump_stop(void);
+extern bool usbif_pump_is_running(void);
+extern uint32_t usbif_pump_bytes, usbif_pump_idle, usbif_pump_timeouts;
 #endif
 
 // Diagnostic: what the host has actually asked the audio function for.
@@ -258,8 +263,76 @@ static mp_obj_t usbif_uac_enable(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_uac_enable_obj, 0, 1, usbif_uac_enable);
 
+// Start moving received audio to I2S from a C task, taking the interpreter
+// out of the isochronous path entirely. Pins and format are supplied by the
+// caller: they are board facts, and usbif has no business guessing them.
+// The codec itself stays Python's to bring up.
+static mp_obj_t usbif_uac_pump_start(size_t n_args, const mp_obj_t *pos_args,
+    mp_map_t *kw_args) {
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    enum { ARG_bclk, ARG_ws, ARG_dout, ARG_rate, ARG_bits, ARG_channels, ARG_i2s_id };
+    static const mp_arg_t allowed[] = {
+        { MP_QSTR_bclk, MP_ARG_REQUIRED | MP_ARG_INT, { .u_int = -1 } },
+        { MP_QSTR_ws, MP_ARG_REQUIRED | MP_ARG_INT, { .u_int = -1 } },
+        { MP_QSTR_dout, MP_ARG_REQUIRED | MP_ARG_INT, { .u_int = -1 } },
+        { MP_QSTR_rate, MP_ARG_KW_ONLY | MP_ARG_INT,
+          { .u_int = CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE } },
+        { MP_QSTR_bits, MP_ARG_KW_ONLY | MP_ARG_INT, { .u_int = 16 } },
+        { MP_QSTR_channels, MP_ARG_KW_ONLY | MP_ARG_INT, { .u_int = 1 } },
+        { MP_QSTR_i2s_id, MP_ARG_KW_ONLY | MP_ARG_INT, { .u_int = 0 } },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
+
+    int err = usbif_pump_start(args[ARG_i2s_id].u_int, args[ARG_bclk].u_int,
+        args[ARG_ws].u_int, args[ARG_dout].u_int,
+        (uint32_t)args[ARG_rate].u_int, args[ARG_bits].u_int,
+        args[ARG_channels].u_int);
+    if (err != 0) {
+        mp_raise_OSError(err);
+    }
+    return mp_const_none;
+    #else
+    (void)n_args;
+    (void)pos_args;
+    (void)kw_args;
+    mp_raise_NotImplementedError(MP_ERROR_TEXT("usbif built without audio"));
+    #endif
+}
+// Minimum 0 positional: MP_ARG_REQUIRED still enforces that bclk/ws/dout are
+// supplied, but they may be given by keyword, which reads far better at a call
+// site naming three GPIO numbers.
+static MP_DEFINE_CONST_FUN_OBJ_KW(usbif_uac_pump_start_obj, 0, usbif_uac_pump_start);
+
+static mp_obj_t usbif_uac_pump_stop(void) {
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    usbif_pump_stop();
+    #endif
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_pump_stop_obj, usbif_uac_pump_stop);
+
+// (running, bytes moved, idle polls, sink timeouts)
+static mp_obj_t usbif_uac_pump_stats(void) {
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    mp_obj_t items[4] = {
+        mp_obj_new_bool(usbif_pump_is_running()),
+        mp_obj_new_int_from_uint(usbif_pump_bytes),
+        mp_obj_new_int_from_uint(usbif_pump_idle),
+        mp_obj_new_int_from_uint(usbif_pump_timeouts),
+    };
+    return mp_obj_new_tuple(4, items);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_pump_stats_obj, usbif_uac_pump_stats);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_uac_enable), MP_ROM_PTR(&usbif_uac_enable_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uac_pump_start), MP_ROM_PTR(&usbif_uac_pump_start_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uac_pump_stop), MP_ROM_PTR(&usbif_uac_pump_stop_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uac_pump_stats), MP_ROM_PTR(&usbif_uac_pump_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_available), MP_ROM_PTR(&usbif_uac_available_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_volume), MP_ROM_PTR(&usbif_uac_volume_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_read), MP_ROM_PTR(&usbif_uac_read_obj) },
