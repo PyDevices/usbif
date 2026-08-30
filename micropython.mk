@@ -11,4 +11,5 @@ CFLAGS_USERMOD += -I$(USBIF_SRC_DIR)
 
 SRC_USERMOD_C += \
     $(USBIF_SRC_DIR)/mod_usbif.c \
+    $(USBIF_SRC_DIR)/usbif_uac.c \
     $(USBIF_SRC_DIR)/shared/usbif_ringbuf.c

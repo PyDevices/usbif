@@ -13,11 +13,23 @@ add_library(usermod_usbif INTERFACE)
 
 target_sources(usermod_usbif INTERFACE
     ${USBIF_SRC_DIR}/mod_usbif.c
+    ${USBIF_SRC_DIR}/usbif_uac.c
     ${USBIF_SRC_DIR}/shared/usbif_ringbuf.c
 )
 
 target_include_directories(usermod_usbif INTERFACE
     ${USBIF_SRC_DIR}
 )
+
+# MicroPython compiles the TinyUSB component against its own tusb_config.h,
+# whose extension hook includes a header from this repo. The component's
+# include path must therefore reach src/ -- the same arrangement the esp32
+# port already makes for shared/tinyusb.
+if(ESP_PLATFORM)
+    idf_component_get_property(usbif_tusb_lib espressif__tinyusb COMPONENT_LIB)
+    if(usbif_tusb_lib)
+        target_include_directories(${usbif_tusb_lib} PRIVATE ${USBIF_SRC_DIR})
+    endif()
+endif()
 
 target_link_libraries(usermod INTERFACE usermod_usbif)

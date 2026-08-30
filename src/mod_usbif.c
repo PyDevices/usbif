@@ -17,6 +17,11 @@
 
 #include "shared/usbif_ringbuf.h"
 
+#if MICROPY_HW_ENABLE_USBDEV
+#include "tusb.h"
+#include "mp_usbd.h"
+#endif
+
 // Class bitmask, mirroring the names in the portable Python API. A bitmask
 // rather than strings so an event record stays fixed-size and ISR-safe; the
 // translation to names happens here, on the consumer side, where allocation
@@ -141,7 +146,48 @@ static mp_obj_t usbif_host_drain(mp_obj_t limit_in) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(usbif_host_drain_obj, usbif_host_drain);
 
+// Debug aid: hand back the built-in configuration descriptor exactly as the
+// host receives it, plus the length the build computed for it. A descriptor
+// whose declared wTotalLength disagrees with the bytes actually emitted is
+// the classic cause of a function that enumerates and then refuses to start,
+// and it is invisible from the host side -- Windows reports "cannot start"
+// either way.
+static mp_obj_t usbif_builtin_desc_cfg(void) {
+    mp_obj_t items[2] = {
+        mp_obj_new_bytes(mp_usbd_builtin_desc_cfg, MP_USBD_BUILTIN_DESC_CFG_LEN),
+        MP_OBJ_NEW_SMALL_INT(MP_USBD_BUILTIN_DESC_CFG_LEN),
+    };
+    return mp_obj_new_tuple(2, items);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_builtin_desc_cfg_obj, usbif_builtin_desc_cfg);
+
+#if CFG_TUD_AUDIO
+extern uint32_t usbif_uac_get_reqs, usbif_uac_set_reqs, usbif_uac_itf_sets, usbif_uac_unhandled;
+extern bool usbif_uac_is_streaming(void);
+extern uint32_t usbif_uac_current_rate(void);
+#endif
+
+// Diagnostic: what the host has actually asked the audio function for.
+static mp_obj_t usbif_uac_stats(void) {
+    #if CFG_TUD_AUDIO
+    mp_obj_t items[6] = {
+        mp_obj_new_int_from_uint(usbif_uac_get_reqs),
+        mp_obj_new_int_from_uint(usbif_uac_set_reqs),
+        mp_obj_new_int_from_uint(usbif_uac_itf_sets),
+        mp_obj_new_int_from_uint(usbif_uac_unhandled),
+        mp_obj_new_bool(usbif_uac_is_streaming()),
+        mp_obj_new_int_from_uint(usbif_uac_current_rate()),
+    };
+    return mp_obj_new_tuple(6, items);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_stats_obj, usbif_uac_stats);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_builtin_desc_cfg), MP_ROM_PTR(&usbif_builtin_desc_cfg_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uac_stats), MP_ROM_PTR(&usbif_uac_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR__usbif) },
     { MP_ROM_QSTR(MP_QSTR_capabilities), MP_ROM_PTR(&usbif_capabilities_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_start), MP_ROM_PTR(&usbif_host_start_obj) },
