@@ -68,11 +68,25 @@
     TUD_AUDIO_EP_SIZE(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE, \
     CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX,        \
     CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX)
-// Software FIFO ahead of the endpoint. High speed delivers eight microframes
-// per millisecond, so a host that writes once per millisecond needs eight
-// times the depth; the example's headroom is kept.
+// Software FIFO ahead of the endpoint.
+//
+// TinyUSB's examples size this as a multiple of the endpoint packet, which at
+// high speed and a modest rate is tiny: 24 kHz mono 16-bit gives an 8-byte
+// packet, so the example's 32x is a 256-byte FIFO -- about 5 ms of audio. A
+// consumer that is not itself an interrupt handler cannot work with that. It
+// showed up as an average read of 19 bytes and a third of the stream lost,
+// and as zero bytes moved by a consumer that waited for 20 ms blocks, because
+// 20 ms never fit.
+//
+// Sized in milliseconds of audio instead, which is what actually governs how
+// long the consumer may be busy elsewhere. 170 ms is generous on a board with
+// PSRAM and leaves room for the display and USB stacks to contend.
+#define USBIF_AUDIO_FIFO_MS (170)
 #define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ          \
-    ((TUD_OPT_HIGH_SPEED ? 32 : 4) * CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX)
+    (CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE / 1000       \
+    * CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX       \
+    * CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX               \
+    * USBIF_AUDIO_FIFO_MS)
 #define CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP (1)
 #define CFG_TUD_AUDIO_FUNC_1_N_AS_INT (1)
 #define CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ (64)
