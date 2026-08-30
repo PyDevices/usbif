@@ -15,6 +15,8 @@
 // terminal 3. They are spelled out here because the descriptor macro and this
 // file must agree, and nothing in the compiler will notice if they stop.
 
+#include <math.h>
+
 #include "py/mpconfig.h"
 
 // tusb.h must come first: CFG_TUD_AUDIO is defined by MicroPython's
@@ -44,6 +46,29 @@ extern void usbif_pump_notify(void);
 static uint32_t usbif_uac_sample_rate = CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE;
 static bool usbif_uac_mute;
 static uint16_t usbif_uac_volume;   // 1/256 dB, as UAC2 specifies
+// The volume and mute above, folded into one linear Q16 multiplier for the
+// stream path. Recomputed here, in control context where a float pow is
+// cheap and rare, so the pump only ever multiplies. 65536 is unity; the
+// advertised range tops out at 0 dB, so gain never exceeds unity and the
+// per-sample multiply cannot clip.
+static volatile uint32_t usbif_uac_gain_q16 = 65536;
+
+static void usbif_uac_update_gain(void) {
+    if (usbif_uac_mute) {
+        usbif_uac_gain_q16 = 0;
+        return;
+    }
+    int16_t db256 = (int16_t)usbif_uac_volume;
+    if (db256 >= 0) {
+        usbif_uac_gain_q16 = 65536;
+        return;
+    }
+    usbif_uac_gain_q16 = (uint32_t)(powf(10.0f, (float)db256 / (256.0f * 20.0f)) * 65536.0f + 0.5f);
+}
+
+uint32_t usbif_uac_gain(void) {
+    return usbif_uac_gain_q16;
+}
 static bool usbif_uac_streaming;
 
 // Diagnostic counters. The first question when a host refuses to start an
@@ -121,9 +146,12 @@ uint32_t usbif_uac_current_rate(void) {
 }
 
 // Host-side volume and mute, as the feature unit last received them. UAC2
-// carries volume as a signed 1/256 dB value; converting that to whatever a
-// codec wants is policy, so it happens in Python beside every other codec
-// decision rather than here.
+// carries volume as a signed 1/256 dB value. Both are applied as digital gain
+// in the stream path (usbif owns the stream, so the host's slider works on
+// every board with no codec involvement); these getters stay for diagnostics
+// and for boards that want to mirror the values onto a codec register --
+// which would apply volume twice, so such a board should expect the pump's
+// gain and account for it.
 bool usbif_uac_is_muted(void) {
     return usbif_uac_mute;
 }
@@ -230,10 +258,12 @@ bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
     if (request->bEntityID == USBIF_UAC_ENTITY_FEATURE_UNIT) {
         if (request->bControlSelector == AUDIO_FU_CTRL_MUTE) {
             usbif_uac_mute = ((audio_control_cur_1_t *)buf)->bCur != 0;
+            usbif_uac_update_gain();
             return true;
         }
         if (request->bControlSelector == AUDIO_FU_CTRL_VOLUME) {
             usbif_uac_volume = tu_le16toh(((audio_control_cur_2_t *)buf)->bCur);
+            usbif_uac_update_gain();
             return true;
         }
     }

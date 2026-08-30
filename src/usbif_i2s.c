@@ -39,6 +39,10 @@
 
 #include "py/runtime.h"
 
+// Host volume and mute as one linear Q16 multiplier, maintained by the
+// control layer in usbif_uac.c.
+extern uint32_t usbif_uac_gain(void);
+
 // One 20 ms block at 24 kHz mono 16-bit, the same size the Python pump found
 // worked well: large enough that per-write overhead is irrelevant, small
 // enough to stay far inside the FIFO.
@@ -145,7 +149,12 @@ static void usbif_pump_task(void *arg) {
         }
 
         uint16_t out_bytes = usable;
-        if (usbif_src_channels == 2 || usbif_decimate > 1) {
+        // Host volume and mute, as one Q16 multiplier maintained by the
+        // control layer. Fetched once per block: a slider move lands on the
+        // next block, which at these block sizes is inaudibly soon. Unity
+        // skips the loop entirely when no conversion is needed either.
+        const uint32_t gain = usbif_uac_gain();
+        if (usbif_src_channels == 2 || usbif_decimate > 1 || gain != 65536u) {
             const int16_t *in = (const int16_t *)(void *)block;
             int16_t *out = (int16_t *)(void *)block;
             const uint16_t frames = usable / frame_bytes;
@@ -160,6 +169,9 @@ static void usbif_pump_task(void *arg) {
                 } else {
                     sample = in[f];
                 }
+                // Gain is <= unity (the advertised range tops out at 0 dB),
+                // so the product cannot exceed int16 and needs no clamp.
+                sample = (int32_t)(((int64_t)sample * gain) >> 16);
                 out[kept++] = (int16_t)sample;
             }
             out_bytes = (uint16_t)(kept * 2);

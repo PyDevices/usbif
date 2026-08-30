@@ -168,6 +168,7 @@ extern bool usbif_uac_is_streaming(void);
 extern uint32_t usbif_uac_current_rate(void);
 extern bool usbif_uac_is_muted(void);
 extern int usbif_uac_volume_db256(void);
+extern uint32_t usbif_uac_gain(void);
 extern bool usbif_uac_is_enabled(void);
 extern void usbif_uac_set_enabled(bool enable);
 extern void usbif_uac_note_read(void);
@@ -223,6 +224,16 @@ static mp_obj_t usbif_uac_read(mp_obj_t buf_in) {
     // Records that a consumer is alive, so the C side stops discarding.
     usbif_uac_note_read();
     uint16_t count = tud_audio_read(buf.buf, (uint16_t)MIN(buf.len, UINT16_MAX));
+    // Host volume and mute, same as the C pump applies, so the two pump
+    // paths sound identical. Whole samples only: a trailing odd byte means
+    // the stream is misframed and scaling half a sample cannot help it.
+    uint32_t gain = usbif_uac_gain();
+    if (gain != 65536u) {
+        int16_t *s = (int16_t *)buf.buf;
+        for (uint16_t i = 0; i < count / 2; i++) {
+            s[i] = (int16_t)(((int64_t)s[i] * gain) >> 16);
+        }
+    }
     return mp_obj_new_int_from_uint(count);
     #else
     (void)buf_in;
