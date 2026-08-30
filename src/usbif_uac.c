@@ -57,6 +57,18 @@ uint32_t usbif_uac_current_rate(void) {
     return usbif_uac_sample_rate;
 }
 
+// Host-side volume and mute, as the feature unit last received them. UAC2
+// carries volume as a signed 1/256 dB value; converting that to whatever a
+// codec wants is policy, so it happens in Python beside every other codec
+// decision rather than here.
+bool usbif_uac_is_muted(void) {
+    return usbif_uac_mute;
+}
+
+int usbif_uac_volume_db256(void) {
+    return (int16_t)usbif_uac_volume;
+}
+
 static bool clock_get(uint8_t rhport, audio_control_request_t const *request) {
     if (request->bControlSelector == AUDIO_CS_CTRL_SAM_FREQ) {
         if (request->bRequest == AUDIO_CS_REQ_CUR) {

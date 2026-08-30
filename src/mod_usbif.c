@@ -165,6 +165,8 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_builtin_desc_cfg_obj, usbif_builtin_desc_
 extern uint32_t usbif_uac_get_reqs, usbif_uac_set_reqs, usbif_uac_itf_sets, usbif_uac_unhandled;
 extern bool usbif_uac_is_streaming(void);
 extern uint32_t usbif_uac_current_rate(void);
+extern bool usbif_uac_is_muted(void);
+extern int usbif_uac_volume_db256(void);
 #endif
 
 // Diagnostic: what the host has actually asked the audio function for.
@@ -217,8 +219,25 @@ static mp_obj_t usbif_uac_read(mp_obj_t buf_in) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(usbif_uac_read_obj, usbif_uac_read);
 
+// The host's own volume and mute, so a board can follow the slider on the PC
+// instead of ignoring it. Returned raw (1/256 dB, and a mute flag) because
+// mapping decibels onto a particular codec's scale is the board's business.
+static mp_obj_t usbif_uac_volume(void) {
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    mp_obj_t items[2] = {
+        mp_obj_new_bool(usbif_uac_is_muted()),
+        MP_OBJ_NEW_SMALL_INT(usbif_uac_volume_db256()),
+    };
+    return mp_obj_new_tuple(2, items);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_volume_obj, usbif_uac_volume);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_uac_available), MP_ROM_PTR(&usbif_uac_available_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uac_volume), MP_ROM_PTR(&usbif_uac_volume_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_read), MP_ROM_PTR(&usbif_uac_read_obj) },
     { MP_ROM_QSTR(MP_QSTR_builtin_desc_cfg), MP_ROM_PTR(&usbif_builtin_desc_cfg_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_stats), MP_ROM_PTR(&usbif_uac_stats_obj) },
