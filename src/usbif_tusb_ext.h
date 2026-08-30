@@ -78,23 +78,20 @@
     CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX)
 // Software FIFO ahead of the endpoint.
 //
-// TinyUSB's examples size this as a multiple of the endpoint packet, which at
-// high speed and a modest rate is tiny: 24 kHz mono 16-bit gives an 8-byte
-// packet, so the example's 32x is a 256-byte FIFO -- about 5 ms of audio. A
-// consumer that is not itself an interrupt handler cannot work with that. It
-// showed up as an average read of 19 bytes and a third of the stream lost,
-// and as zero bytes moved by a consumer that waited for 20 ms blocks, because
-// 20 ms never fit.
+// Sized as TinyUSB's own examples size it, and deliberately small. An earlier
+// version made this 170 ms because the pump was Python and needed the slack;
+// that is actively harmful once the pump is in C, because
+// AUDIO_FEEDBACK_METHOD_FIFO_COUNT works by "regulating the FIFO level to half
+// fill". A 170 ms FIFO therefore instructs the host to slow down until ~85 ms
+// of audio is sitting in it -- measured as the host sending 3.3% slow, heard
+// as playback that drags and skips, and felt on the host as an audio engine
+// backing up. The buffer was not protecting the stream; it was detuning the
+// regulator that governs it.
 //
-// Sized in milliseconds of audio instead, which is what actually governs how
-// long the consumer may be busy elsewhere. 170 ms is generous on a board with
-// PSRAM and leaves room for the display and USB stacks to contend.
-#define USBIF_AUDIO_FIFO_MS (170)
+// TinyUSB's guidance is a minimum of four frames to absorb jitter; the
+// example's multiplier keeps a little more than that.
 #define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ          \
-    (CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE / 1000       \
-    * CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX       \
-    * CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX               \
-    * USBIF_AUDIO_FIFO_MS)
+    ((TUD_OPT_HIGH_SPEED ? 32 : 4) * CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX)
 #define CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP (1)
 #define CFG_TUD_AUDIO_FUNC_1_N_AS_INT (1)
 #define CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ (64)

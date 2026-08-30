@@ -33,6 +33,7 @@
 #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
 
 extern bool usbif_pump_is_running(void);
+extern void usbif_pump_notify(void);
 
 #define USBIF_UAC_ENTITY_CLOCK (0x04)
 #define USBIF_UAC_ENTITY_FEATURE_UNIT (0x02)
@@ -286,7 +287,14 @@ bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received,
     // blocks out from under the pump and halved throughput. The pump therefore
     // carries its own overflow guard, in its own loop, and this one covers the
     // case where the only consumer is Python or there is none at all.
-    if (!usbif_pump_is_running() && tud_audio_available() > USBIF_UAC_HIGH_WATER) {
+    // Wake the C pump the instant audio lands, so it never has to sleep
+    // through a FIFO smaller than a scheduler tick.
+    if (usbif_pump_is_running()) {
+        usbif_pump_notify();
+        return true;
+    }
+
+    if (tud_audio_available() > USBIF_UAC_HIGH_WATER) {
         static uint8_t sink[64];
         usbif_uac_overflows++;
         while (tud_audio_available() > USBIF_UAC_HIGH_WATER / 2) {

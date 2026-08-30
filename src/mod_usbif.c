@@ -171,7 +171,7 @@ extern int usbif_uac_volume_db256(void);
 extern bool usbif_uac_is_enabled(void);
 extern void usbif_uac_set_enabled(bool enable);
 extern void usbif_uac_note_read(void);
-extern int usbif_pump_start(int i2s_id, int bclk, int ws, int dout,
+extern int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
     uint32_t rate, int bits, int channels);
 extern void usbif_pump_stop(void);
 extern bool usbif_pump_is_running(void);
@@ -270,11 +270,15 @@ static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_uac_enable_obj, 0, 1, usbif_uac
 static mp_obj_t usbif_uac_pump_start(size_t n_args, const mp_obj_t *pos_args,
     mp_map_t *kw_args) {
     #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
-    enum { ARG_bclk, ARG_ws, ARG_dout, ARG_rate, ARG_bits, ARG_channels, ARG_i2s_id };
+    enum { ARG_bclk, ARG_ws, ARG_dout, ARG_mclk, ARG_rate, ARG_bits, ARG_channels,
+           ARG_i2s_id };
     static const mp_arg_t allowed[] = {
         { MP_QSTR_bclk, MP_ARG_REQUIRED | MP_ARG_INT, { .u_int = -1 } },
         { MP_QSTR_ws, MP_ARG_REQUIRED | MP_ARG_INT, { .u_int = -1 } },
         { MP_QSTR_dout, MP_ARG_REQUIRED | MP_ARG_INT, { .u_int = -1 } },
+        // Give the I2S peripheral the MCLK pin so every clock the codec sees
+        // comes from one divider. -1 leaves MCLK to whatever else drives it.
+        { MP_QSTR_mclk, MP_ARG_KW_ONLY | MP_ARG_INT, { .u_int = -1 } },
         { MP_QSTR_rate, MP_ARG_KW_ONLY | MP_ARG_INT,
           { .u_int = CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE } },
         { MP_QSTR_bits, MP_ARG_KW_ONLY | MP_ARG_INT, { .u_int = 16 } },
@@ -285,7 +289,7 @@ static mp_obj_t usbif_uac_pump_start(size_t n_args, const mp_obj_t *pos_args,
     mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
 
     int err = usbif_pump_start(args[ARG_i2s_id].u_int, args[ARG_bclk].u_int,
-        args[ARG_ws].u_int, args[ARG_dout].u_int,
+        args[ARG_ws].u_int, args[ARG_dout].u_int, args[ARG_mclk].u_int,
         (uint32_t)args[ARG_rate].u_int, args[ARG_bits].u_int,
         args[ARG_channels].u_int);
     if (err != 0) {
