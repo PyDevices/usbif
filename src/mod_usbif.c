@@ -604,6 +604,35 @@ static mp_obj_t usbif_host_msc_close_py(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_msc_close_obj, usbif_host_msc_close_py);
 
+// USB MIDI device: raw MIDI 1.0 byte streams in and out. TinyUSB packs and
+// unpacks the USB-MIDI event framing; callers speak plain running-status-free
+// MIDI (0x90 0x3C 0x64 is a middle-C note-on).
+static mp_obj_t usbif_midi_write(mp_obj_t buf_in) {
+    #if defined(CFG_TUD_MIDI) && CFG_TUD_MIDI
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_READ);
+    uint32_t n = tud_midi_stream_write(0, (const uint8_t *)buf.buf, buf.len);
+    return mp_obj_new_int_from_uint(n);
+    #else
+    (void)buf_in;
+    return MP_OBJ_NEW_SMALL_INT(0);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(usbif_midi_write_obj, usbif_midi_write);
+
+static mp_obj_t usbif_midi_read(mp_obj_t buf_in) {
+    #if defined(CFG_TUD_MIDI) && CFG_TUD_MIDI
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_WRITE);
+    uint32_t n = tud_midi_stream_read(buf.buf, buf.len);
+    return mp_obj_new_int_from_uint(n);
+    #else
+    (void)buf_in;
+    return MP_OBJ_NEW_SMALL_INT(0);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(usbif_midi_read_obj, usbif_midi_read);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_uac_enable), MP_ROM_PTR(&usbif_uac_enable_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_start), MP_ROM_PTR(&usbif_uac_pump_start_obj) },
@@ -634,6 +663,8 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_msc_info), MP_ROM_PTR(&usbif_host_msc_info_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_msc_read), MP_ROM_PTR(&usbif_host_msc_read_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_msc_close), MP_ROM_PTR(&usbif_host_msc_close_obj) },
+    { MP_ROM_QSTR(MP_QSTR_midi_write), MP_ROM_PTR(&usbif_midi_write_obj) },
+    { MP_ROM_QSTR(MP_QSTR_midi_read), MP_ROM_PTR(&usbif_midi_read_obj) },
 };
 static MP_DEFINE_CONST_DICT(usbif_module_globals, usbif_module_globals_table);
 

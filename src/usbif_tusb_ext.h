@@ -18,6 +18,13 @@
 #define USBIF_TUSB_EXT_H
 
 #define CFG_TUD_AUDIO (1)
+// And a USB MIDI function beside it: TinyUSB carries the whole class
+// (descriptor macro, jack plumbing, tud_midi_* API); this file only has to
+// give it numbers and space. Both functions appear and disappear together
+// through the same runtime opt-in the audio function uses.
+#define CFG_TUD_MIDI (1)
+#define CFG_TUD_MIDI_RX_BUFSIZE (TUD_OPT_HIGH_SPEED ? 512 : 64)
+#define CFG_TUD_MIDI_TX_BUFSIZE (TUD_OPT_HIGH_SPEED ? 512 : 64)
 
 // --- Interface, endpoint and string numbering.
 //
@@ -39,12 +46,21 @@
 #define USBD_EP_AUDIO_OUT (USBIF_EPNUM_AUDIO)
 #define USBD_EP_AUDIO_FB (0x80 | USBIF_EPNUM_AUDIO)
 
+// MIDI sits after the audio function: its descriptor also spans two
+// interfaces (an AudioControl stub and MIDIStreaming), with one bulk
+// endpoint pair.
+#define USBD_ITF_MIDI (USBD_ITF_AUDIO + 2)
+#define USBIF_EPNUM_MIDI (USBIF_EPNUM_AUDIO + 1)
+#define USBD_EP_MIDI_OUT (USBIF_EPNUM_MIDI)
+#define USBD_EP_MIDI_IN (0x80 | USBIF_EPNUM_MIDI)
+
 // The audio function occupies two interfaces (AudioControl and
-// AudioStreaming), which is why the IAD in the descriptor declares two.
+// AudioStreaming) and MIDI two more, which the bounds below must cover so
+// runtime_dev_open keeps declining everything the built-in descriptor owns.
 #undef USBD_ITF_BUILTIN_MAX
-#define USBD_ITF_BUILTIN_MAX (USBD_ITF_AUDIO + 2)
+#define USBD_ITF_BUILTIN_MAX (USBD_ITF_MIDI + 2)
 #undef USBD_EP_BUILTIN_MAX
-#define USBD_EP_BUILTIN_MAX (USBIF_EPNUM_AUDIO + 1)
+#define USBD_EP_BUILTIN_MAX (USBIF_EPNUM_MIDI + 1)
 
 // --- Audio function sizing, following TinyUSB's own uac2_speaker_fb example.
 //
@@ -156,7 +172,7 @@
 // String index 0: the function is left unnamed so that no entry has to be
 // added to MicroPython's string table, which would be a third hook for
 // cosmetic benefit. Hosts fall back to the device product string.
-#define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_AUDIO_SPEAKER_STEREO_FB_DESC_LEN)
+#define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_AUDIO_SPEAKER_STEREO_FB_DESC_LEN + TUD_MIDI_DESC_LEN)
 // High speed counts in 125 us microframes, so bInterval 4 gives the 1 ms
 // feedback refresh the class expects; full speed counts in 1 ms frames, where
 // that is bInterval 1.
@@ -171,6 +187,12 @@
     /*_epout*/ USBD_EP_AUDIO_OUT,                      \
     /*_epoutsize*/ CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX, \
     /*_epfb*/ USBD_EP_AUDIO_FB,                        \
-    /*_epfbsize*/ 4),
+    /*_epfbsize*/ 4),                                  \
+    TUD_MIDI_DESCRIPTOR(                               \
+    /*_itfnum*/ USBD_ITF_MIDI,                         \
+    /*_stridx*/ 0,                                     \
+    /*_epout*/ USBD_EP_MIDI_OUT,                       \
+    /*_epin*/ USBD_EP_MIDI_IN,                         \
+    /*_epsize*/ (TUD_OPT_HIGH_SPEED ? 512 : 64)),
 
 #endif // USBIF_TUSB_EXT_H
