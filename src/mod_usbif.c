@@ -698,6 +698,9 @@ static mp_obj_t usbif_dev_functions(size_t n_args, const mp_obj_t *args) {
     #if USBIF_HAVE_FN
     if (n_args) {
         mp_int_t mask = mp_obj_get_int(args[0]);
+        if (mask == 0) {
+            mp_raise_ValueError(MP_ERROR_TEXT("a device must present at least one function"));
+        }
         if (mask < 0 || usbif_fn_set((uint16_t)mask) != 0) {
             mp_raise_ValueError(MP_ERROR_TEXT("function not built into this firmware"));
         }

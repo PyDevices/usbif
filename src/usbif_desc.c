@@ -299,6 +299,13 @@ int usbif_fn_set(uint16_t mask) {
     if (mask & ~(uint16_t)USBIF_FN_BUILT) {
         return -1;      // asked for a function this firmware does not have
     }
+    if (mask == 0) {
+        // A configuration descriptor with no interfaces is malformed, and
+        // hosts say so: Windows enumerates it and marks the device in
+        // error. Presenting nothing is a legitimate wish, but detaching is
+        // how USB expresses it -- not an empty costume.
+        return -2;
+    }
     if (mask == usbif_fn_enabled) {
         return 0;
     }
