@@ -56,6 +56,9 @@ Also working, and the foundation the rest builds on:
 - the portable API and its Linux and Windows desktop backends, in `pydevices`
   (`lib/usbif`), with one conformance suite run against every backend
 - the event transport in C (`src/shared/usbif_ringbuf.c`), with host-side tests
+- a structural validator for the descriptor assembler
+  (`examples/costume_selftest.py`), which checks every costume the firmware
+  can wear without a host in the loop
 - four small patches to MicroPython (`patches/`), each with provenance: a
   `tusb_config.h` hook, a configuration-descriptor hook, three weak hooks that
   let this module vary what it advertises at runtime, and an esp32 helper that
@@ -71,9 +74,9 @@ rather than pretending, and a report from the field is what promotes it. And the
 class at a time; proven at full speed only (the ESP32-P4's high-speed host
 mode has an open defect, tracked in the findings); `host_start()`'s class
 filter is accepted but not yet honoured; MSC reads blocks but is not mounted
-as a filesystem; HID delivers raw reports rather than decoded events;
-`host_stop()` hangs on the S3; and a surprise detach leaks its transfer
-objects. All are recorded in [`docs/phase0-findings.md`](docs/phase0-findings.md). The plan and the evidence
+as a filesystem; HID delivers raw reports rather than decoded events; and
+`host_stop()` hangs on the S3. All are recorded in
+[`docs/phase0-findings.md`](docs/phase0-findings.md). The plan and the evidence
 behind every decision are in [`docs/`](docs/).
 
 ## Why the events are drained rather than delivered
