@@ -1,0 +1,45 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ringbuf:
+    # The event transport is the piece the whole host side rests on, and it
+    # is testable without hardware: a failure here should be a two-second
+    # answer on a runner rather than a reflash on someone's desk.
+    name: Ring buffer (host build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run the SPSC ring buffer tests
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+             -o /tmp/test_ringbuf tests/test_ringbuf.c src/shared/usbif_ringbuf.c
+          /tmp/test_ringbuf
+
+  patches:
+    # The patch queue is only useful if it still applies. This catches the
+    # drift that would otherwise be found by a developer mid-build.
+    name: Patch queue applies to the pinned upstream
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the MicroPython version the patches are written against
+        run: |
+          git clone --depth 1 --branch v1.28.0 \
+            https://github.com/micropython/micropython.git /tmp/micropython
+      - name: Apply, then reverse, the whole queue
+        working-directory: /tmp/micropython
+        run: |
+          for p in "$GITHUB_WORKSPACE"/patches/*.patch; do
+            echo "applying $(basename "$p")"
+            git apply "$p"
+          done
+          for p in $(ls -r "$GITHUB_WORKSPACE"/patches/*.patch); do
+            git apply --reverse "$p"
+          done
+          test -z "$(git status --porcelain)" || {
+            echo "tree not pristine after reverse"; git status --porcelain; exit 1;
+          }
