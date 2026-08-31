@@ -190,11 +190,20 @@
 // on such devices Windows requires every function grouped by one.
 // TinyUSB's TUD_MIDI_DESCRIPTOR ships without it; the audio descriptor
 // that worked leads with its own IAD, which is the tell.
+// The IAD groups the MIDI function on composite (CDC-bearing, class EF)
+// devices, where Windows requires it. A pure MIDI device (no CDC, class
+// 00, MIDI at interface 0) must NOT carry one: the classic embedded MIDI
+// host expects the bare AC+MS pair and nothing before it.
+#if CFG_TUD_CDC
 #define USBIF_MIDI_IAD_LEN (8)
 #define USBIF_MIDI_IAD \
     8, TUSB_DESC_INTERFACE_ASSOCIATION, USBD_ITF_MIDI, 2, \
     TUSB_CLASS_AUDIO, AUDIO_SUBCLASS_MIDI_STREAMING, \
     AUDIO_FUNC_PROTOCOL_CODE_UNDEF, 0,
+#else
+#define USBIF_MIDI_IAD_LEN (0)
+#define USBIF_MIDI_IAD
+#endif
 
 #if USBIF_EXT_AUDIO
 #define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_AUDIO_SPEAKER_STEREO_FB_DESC_LEN + USBIF_MIDI_IAD_LEN + TUD_MIDI_DESC_LEN)

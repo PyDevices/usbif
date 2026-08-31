@@ -26,6 +26,13 @@
 
 #include "usbif_classes.h"
 
+// From usbif_desc.c, present on any build with the TinyUSB extension
+// header -- audio or not.
+#if defined(MICROPY_HW_USB_EXT_TUSB_CONFIG) && MICROPY_HW_ENABLE_USBDEV
+extern bool usbif_ext_is_enabled(void);
+extern void usbif_ext_set_enabled(bool enable);
+#endif
+
 // Host engine availability: the IDF USB Host Library, on chips with an OTG
 // controller. The same gate guards usbif_host.c; elsewhere the host_* calls
 // keep their Phase-1 stub behaviour (an honest empty capability set).
@@ -240,8 +247,7 @@ extern uint32_t usbif_uac_current_rate(void);
 extern bool usbif_uac_is_muted(void);
 extern int usbif_uac_volume_db256(void);
 extern uint32_t usbif_uac_gain(void);
-extern bool usbif_ext_is_enabled(void);
-extern void usbif_ext_set_enabled(bool enable);
+
 extern void usbif_uac_note_read(void);
 extern int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
     uint32_t rate, int bits, int channels);

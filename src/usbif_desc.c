@@ -88,6 +88,14 @@ void usbif_ext_set_enabled(bool enable) {
     if (usbif_uac_on_ext_toggled) {
         usbif_uac_on_ext_toggled();
     }
+    // A build with no built-in CDC/MSC never initialises TinyUSB at boot
+    // (mp_usbd_init's need_usb is false) -- so a pure-MIDI device's USB
+    // port stays electrically dark until someone turns the key. Learned
+    // knocking on a synth box that could not hear us.
+    if (!tud_inited()) {
+        tusb_init();
+        mp_hal_delay_ms(50);
+    }
     tud_disconnect();
     mp_hal_delay_ms(120);
     tud_connect();
