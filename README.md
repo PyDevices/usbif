@@ -15,7 +15,13 @@ application written against it runs unchanged on a workstation.
 
 ## Status: early development
 
-**Nothing is released. One class works: the board can be a USB sound card.**
+**Nothing is released. Working today: sound card, MIDI instrument, and a
+USB host that enumerates devices and speaks CDC, HID, and MSC.**
+
+The flagship demo, real and audible: one ESP32 board on one cable was
+simultaneously the MIDI keyboard driving a DAW **and** the sound card
+playing that DAW's output -- first and last device in the signal chain at
+once, REPL riding the same connector.
 
 An ESP32-P4 running this enumerates on a PC as a class-compliant USB Audio
 device — no driver installed — alongside its CDC REPL on the same connector,
