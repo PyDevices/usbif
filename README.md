@@ -29,11 +29,23 @@ plays audio out of the board's codec, and is **opt-in**: at boot the board is
 a plain CDC device, and the audio function appears only when Python asks for
 it. A host cannot be wedged by a board nobody is pumping.
 
+The board's USB identity is a Python decision, not a build option: every
+function is compiled in, and the application chooses which the host sees.
+
 ```python
-import usbif, _usbif
-_usbif.uac_enable(True)          # advertise the audio function; re-enumerates
+import usbif.auto, _usbif
+
+dev = usbif.auto.device()
+dev.functions("cdc", "uac")      # a console and a sound card
+dev.functions("midi")            # a bare MIDI instrument, interface 0
+dev.functions()                  # -> frozenset({'midi'})
+
 _usbif.uac_pump_start(bclk, ws, dout, rate=24000, bits=16, channels=1)
 ```
+
+Each call re-enumerates -- USB has no way to change identity in place -- and
+the configuration descriptor is assembled at that moment, with interfaces
+renumbered and the device class set to match what was actually emitted.
 
 Also working, and the foundation the rest builds on:
 
