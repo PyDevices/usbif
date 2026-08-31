@@ -18,8 +18,9 @@ directly and have no desktop counterpart yet.
 
 ## Status: early development
 
-**Nothing is released. Working today: sound card, MIDI instrument, and a
-USB host that enumerates devices and speaks CDC, HID, and MSC.**
+**Nothing is released. Working today: sound card, MIDI instrument, HID
+keyboard and mouse, and a USB host that enumerates devices and speaks CDC,
+HID, and MSC — with the board's USB identity chosen at runtime from Python.**
 
 The flagship demo, real and audible: one ESP32 board on one cable was
 simultaneously the MIDI keyboard driving a DAW **and** the sound card
@@ -62,11 +63,11 @@ Also working, and the foundation the rest builds on:
 
 **Not yet working, said precisely:** UVC in either direction; MIDI as a
 *host* (the board as a MIDI device is the flagship above); audio as a host;
-hubs; HID as a *device* (the board as a keyboard or control surface -- the
-host direction works, the device direction has no function yet); and macOS
-desktop support, for the honest reason that nobody in this project has a Mac
-to test on -- the portable API's shape does not exclude it, and `auto.py`
-returns a null backend there rather than pretending. And the working host side carries honest limits for now: one session per
+hubs; and macOS
+desktop support, which sits at the [community-verified
+tier](https://github.com/PyDevices/.github/blob/main/docs/platform-support-tiers.md):
+no Mac is on this project's bench, `auto.py` returns a null backend there
+rather than pretending, and a report from the field is what promotes it. And the working host side carries honest limits for now: one session per
 class at a time; proven at full speed only (the ESP32-P4's high-speed host
 mode has an open defect, tracked in the findings); `host_start()`'s class
 filter is accepted but not yet honoured; MSC reads blocks but is not mounted
