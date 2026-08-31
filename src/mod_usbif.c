@@ -48,6 +48,11 @@ extern uint32_t usbif_host_attaches, usbif_host_detaches, usbif_host_errors;
 extern int usbif_host_lib_counts(int *num_devices, int *num_clients);
 extern int usbif_host_port_cycle(void);
 extern void usbif_host_intr_dump(void);
+extern int usbif_cdc_open(uint32_t dev_id);
+extern int usbif_cdc_write(const uint8_t *data, size_t len);
+extern int usbif_cdc_read(uint8_t *out, size_t max);
+extern void usbif_cdc_close(void);
+extern uint32_t usbif_cdc_rx_dropped(void);
 #else
 #define USBIF_HAVE_HOST (0)
 #endif
@@ -127,7 +132,12 @@ static mp_obj_t usbif_device_row(const usbif_event_t *event) {
 
 static mp_obj_t usbif_host_start(mp_obj_t classes_in) {
     (void)classes_in;  // honoured once class drivers exist
-    usbif_rb_init(&usbif_events, usbif_event_slots, USBIF_EVENT_CAPACITY);
+    // Only a genuine start initialises the ring: a second host_start() on a
+    // running host must be a no-op, not a wipe of queued events -- learned
+    // when the NUCLEO's attach events vanished under an idempotent restart.
+    if (!usbif_host_running) {
+        usbif_rb_init(&usbif_events, usbif_event_slots, USBIF_EVENT_CAPACITY);
+    }
     #if USBIF_HAVE_HOST
     int err = usbif_host_start_c();
     if (err != 0) {
@@ -426,6 +436,64 @@ static mp_obj_t usbif_host_intr_dump_py(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_intr_dump_obj, usbif_host_intr_dump_py);
 
+// CDC-ACM session: open by the dev_id an attach event (or host_devices row)
+// reported. One session at a time in this first cut.
+static mp_obj_t usbif_host_cdc_open(mp_obj_t dev_id_in) {
+    #if USBIF_HAVE_HOST
+    int err = usbif_cdc_open((uint32_t)mp_obj_get_int(dev_id_in));
+    if (err != 0) {
+        mp_raise_OSError(MP_EIO);
+    }
+    #else
+    (void)dev_id_in;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(usbif_host_cdc_open_obj, usbif_host_cdc_open);
+
+static mp_obj_t usbif_host_cdc_write(mp_obj_t buf_in) {
+    #if USBIF_HAVE_HOST
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_READ);
+    // Write the whole buffer through the single in-flight transfer.
+    size_t done = 0;
+    while (done < buf.len) {
+        int n = usbif_cdc_write((const uint8_t *)buf.buf + done, buf.len - done);
+        if (n <= 0) {
+            break;
+        }
+        done += (size_t)n;
+    }
+    return mp_obj_new_int_from_uint(done);
+    #else
+    (void)buf_in;
+    return MP_OBJ_NEW_SMALL_INT(0);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(usbif_host_cdc_write_obj, usbif_host_cdc_write);
+
+static mp_obj_t usbif_host_cdc_read(mp_obj_t buf_in) {
+    #if USBIF_HAVE_HOST
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_WRITE);
+    int n = usbif_cdc_read((uint8_t *)buf.buf, buf.len);
+    return MP_OBJ_NEW_SMALL_INT(n < 0 ? 0 : n);
+    #else
+    (void)buf_in;
+    return MP_OBJ_NEW_SMALL_INT(0);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(usbif_host_cdc_read_obj, usbif_host_cdc_read);
+
+static mp_obj_t usbif_host_cdc_close_py(void) {
+    #if USBIF_HAVE_HOST
+    usbif_cdc_close();
+    #endif
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_cdc_close_obj, usbif_host_cdc_close_py);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_uac_enable), MP_ROM_PTR(&usbif_uac_enable_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_start), MP_ROM_PTR(&usbif_uac_pump_start_obj) },
@@ -445,6 +513,10 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_stats), MP_ROM_PTR(&usbif_host_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_port_cycle), MP_ROM_PTR(&usbif_host_port_cycle_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_intr_dump), MP_ROM_PTR(&usbif_host_intr_dump_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_cdc_open), MP_ROM_PTR(&usbif_host_cdc_open_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_cdc_write), MP_ROM_PTR(&usbif_host_cdc_write_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_cdc_read), MP_ROM_PTR(&usbif_host_cdc_read_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_cdc_close), MP_ROM_PTR(&usbif_host_cdc_close_obj) },
 };
 static MP_DEFINE_CONST_DICT(usbif_module_globals, usbif_module_globals_table);
 

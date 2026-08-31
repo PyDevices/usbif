@@ -174,7 +174,10 @@ static void usbif_host_on_new_dev(uint8_t addr) {
     usbif_host_attaches++;
 }
 
+extern void usbif_cdc_on_dev_gone(usb_device_handle_t dev);
+
 static void usbif_host_on_dev_gone(usb_device_handle_t hdl) {
+    usbif_cdc_on_dev_gone(hdl);
     for (int i = 0; i < USBIF_HOST_MAX_DEVS; i++) {
         usbif_host_slot_t *slot = &usbif_host_devs[i];
         if (slot->in_use && slot->hdl == hdl) {
@@ -383,6 +386,22 @@ void usbif_host_intr_dump(void) {
 
 bool usbif_host_is_running(void) {
     return usbif_host_task_handle != NULL;
+}
+
+// For class drivers (usbif_host_cdc.c): the client everything is opened
+// under, and a device lookup by the dev_id the event transport reported.
+usb_host_client_handle_t usbif_host_client_get(void) {
+    return usbif_host_client;
+}
+
+int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out) {
+    for (int i = 0; i < USBIF_HOST_MAX_DEVS; i++) {
+        if (usbif_host_devs[i].in_use && usbif_host_devs[i].addr == dev_id) {
+            *out = usbif_host_devs[i].hdl;
+            return 0;
+        }
+    }
+    return -1;
 }
 
 // The library's own view: how many devices and clients it currently tracks.
