@@ -23,7 +23,7 @@
 // and have no use for an isochronous audio function anyway. Default off for
 // the slim-descriptor experiment; boards that want the sound card set it.
 #ifndef USBIF_EXT_AUDIO
-#define USBIF_EXT_AUDIO (0)
+#define USBIF_EXT_AUDIO (1)
 #endif
 #define CFG_TUD_AUDIO (USBIF_EXT_AUDIO)
 // And a USB MIDI function beside it: TinyUSB carries the whole class

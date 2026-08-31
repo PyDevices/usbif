@@ -240,8 +240,8 @@ extern uint32_t usbif_uac_current_rate(void);
 extern bool usbif_uac_is_muted(void);
 extern int usbif_uac_volume_db256(void);
 extern uint32_t usbif_uac_gain(void);
-extern bool usbif_uac_is_enabled(void);
-extern void usbif_uac_set_enabled(bool enable);
+extern bool usbif_ext_is_enabled(void);
+extern void usbif_ext_set_enabled(bool enable);
 extern void usbif_uac_note_read(void);
 extern int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
     uint32_t rate, int bits, int channels);
@@ -332,11 +332,11 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_volume_obj, usbif_uac_volume);
 // Advertise the audio function to the host, or stop advertising it. The board
 // re-enumerates either way -- USB has no way to change identity in place.
 static mp_obj_t usbif_uac_enable(size_t n_args, const mp_obj_t *args) {
-    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    #if defined(MICROPY_HW_USB_EXT_TUSB_CONFIG) && MICROPY_HW_ENABLE_USBDEV
     if (n_args) {
-        usbif_uac_set_enabled(mp_obj_is_true(args[0]));
+        usbif_ext_set_enabled(mp_obj_is_true(args[0]));
     }
-    return mp_obj_new_bool(usbif_uac_is_enabled());
+    return mp_obj_new_bool(usbif_ext_is_enabled());
     #else
     (void)n_args;
     (void)args;

@@ -80,7 +80,7 @@ static bool usbif_uac_streaming;
 // make it the default output, route system audio to it, and then stall its
 // audio engine when nothing aboard is draining the stream -- observed on
 // Windows as the whole desktop backing up, keyboard included.
-static bool usbif_uac_enabled;
+extern bool usbif_ext_enabled;   // owned by usbif_desc.c
 
 uint32_t usbif_uac_get_reqs;
 uint32_t usbif_uac_set_reqs;
@@ -93,52 +93,15 @@ bool usbif_uac_is_streaming(void) {
 }
 
 bool usbif_uac_is_enabled(void) {
-    return usbif_uac_enabled;
+    return usbif_ext_enabled;
+}
+
+// Called by usbif_desc.c on an advertise/withdraw toggle (overrides its weak).
+void usbif_uac_on_ext_toggled(void) {
+    usbif_uac_streaming = false;
 }
 
 void usbif_uac_note_read(void) {
-}
-
-// The built-in configuration descriptor, with the audio function present or
-// absent. The enabled form is the compile-time one; the disabled form is its
-// prefix with two fields corrected, which avoids keeping a second descriptor
-// in step with the first by hand.
-static uint8_t usbif_desc_buf[MP_USBD_BUILTIN_DESC_CFG_LEN];
-
-#define USBIF_DESC_LEN_WITHOUT_AUDIO \
-    (MP_USBD_BUILTIN_DESC_CFG_LEN - MICROPY_HW_USB_EXT_DESC_CFG_LEN)
-
-const uint8_t *mp_usbd_builtin_desc_cfg_get(void) {
-    if (usbif_uac_enabled) {
-        return mp_usbd_builtin_desc_cfg;
-    }
-    memcpy(usbif_desc_buf, mp_usbd_builtin_desc_cfg, USBIF_DESC_LEN_WITHOUT_AUDIO);
-    // wTotalLength and bNumInterfaces, at their fixed offsets in the
-    // configuration descriptor (USB 2.0 table 9-10).
-    usbif_desc_buf[2] = (uint8_t)(USBIF_DESC_LEN_WITHOUT_AUDIO & 0xFF);
-    usbif_desc_buf[3] = (uint8_t)(USBIF_DESC_LEN_WITHOUT_AUDIO >> 8);
-    usbif_desc_buf[4] = (uint8_t)USBD_ITF_AUDIO;
-    return usbif_desc_buf;
-}
-
-// Must track the descriptor: runtime_dev_open() uses this to decide which
-// interfaces belong to built-in drivers, and a bound that disagrees with the
-// descriptor leaves an interface claimed by nobody.
-uint8_t mp_usbd_builtin_itf_max(void) {
-    return usbif_uac_enabled ? USBD_ITF_BUILTIN_MAX : (uint8_t)USBD_ITF_AUDIO;
-}
-
-// Re-enumerate so the host re-reads the configuration. USB has no way to
-// change identity in place; a detach and re-attach is the mechanism.
-void usbif_uac_set_enabled(bool enable) {
-    if (enable == usbif_uac_enabled) {
-        return;
-    }
-    usbif_uac_enabled = enable;
-    usbif_uac_streaming = false;
-    tud_disconnect();
-    mp_hal_delay_ms(120);
-    tud_connect();
 }
 
 uint32_t usbif_uac_current_rate(void) {
