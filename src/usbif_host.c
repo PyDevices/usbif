@@ -16,11 +16,13 @@
 // after host_stop() + replug. One controller, one owner at a time; the
 // concurrent host+device story waits for hardware with both ports wired.
 //
-// Class drivers are deliberately absent at this stage. Enumeration alone
-// answers the questions that matter first -- does the handoff work, does a
-// device attach, what does it claim to be -- and the class bitmask derived
-// from interface descriptors is exactly what host_start()'s class filter
-// will need when the drivers arrive.
+// Class drivers (CDC, HID, MSC) now exist alongside this file, each opened
+// on demand by Python once it sees an attach whose class bitmask matches.
+// The bitmask itself is derived from interface descriptors below, and is
+// also what host_start()'s class filter is checked against: a device
+// offering none of the requested classes is closed immediately in
+// usbif_host_on_new_dev and never occupies a slot, so it never appears in
+// host_devices() or as an ATTACH event.
 
 #include "py/mpconfig.h"
 
@@ -78,6 +80,17 @@ static usbif_host_slot_t usbif_host_devs[USBIF_HOST_MAX_DEVS];
 static usb_host_client_handle_t usbif_host_client;
 static TaskHandle_t usbif_host_task_handle;
 static volatile bool usbif_host_task_running;
+
+// Set by mod_usbif.c's host_start() before usbif_host_start_c() installs the
+// library, so it is always in place before the client callback can fire.
+// Defaults to "everything" rather than zero, so a device attaching before any
+// filter is set (there shouldn't be one, but a static default of zero would
+// silently hide every device) is never mistaken for "filter to nothing".
+static uint16_t usbif_host_class_filter = 0xFFFF;
+
+void usbif_host_set_class_filter(uint16_t mask) {
+    usbif_host_class_filter = mask;
+}
 
 // Diagnostic counters, same philosophy as the UAC ones: the first question
 // when nothing attaches is whether anything happened at all.
@@ -152,12 +165,22 @@ static void usbif_host_on_new_dev(uint8_t addr) {
         return;
     }
 
+    uint16_t classes = usbif_class_bits(cfg_desc);
+    if ((classes & usbif_host_class_filter) == 0) {
+        // Offers none of the classes host_start() was asked for: close it
+        // without ever marking the slot in_use, so it is invisible to
+        // host_devices() and generates no ATTACH event -- the slot search
+        // above finds it free again next time, since it was never claimed.
+        usb_host_device_close(usbif_host_client, hdl);
+        return;
+    }
+
     slot->in_use = true;
     slot->addr = addr;
     slot->hdl = hdl;
     slot->vid = dev_desc->idVendor;
     slot->pid = dev_desc->idProduct;
-    slot->classes = usbif_class_bits(cfg_desc);
+    slot->classes = classes;
     // usb_speed_t counts low/full/high from zero; usbif reserves zero for
     // "unknown", so shift by one.
     slot->speed = (uint8_t)(info.speed + 1);

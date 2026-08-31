@@ -65,6 +65,7 @@ extern int usbif_host_snapshot(usbif_event_t *out, int max);
 extern uint32_t usbif_host_attaches, usbif_host_detaches, usbif_host_errors;
 extern int usbif_host_lib_counts(int *num_devices, int *num_clients);
 extern int usbif_host_port_cycle(void);
+extern void usbif_host_set_class_filter(uint16_t mask);
 extern void usbif_host_intr_dump(void);
 extern int usbif_cdc_open(uint32_t dev_id);
 extern int usbif_cdc_write(const uint8_t *data, size_t len);
@@ -116,11 +117,17 @@ static const qstr usbif_speed_names[] = {
     MP_QSTRnull, MP_QSTR_low, MP_QSTR_full, MP_QSTR_high,
 };
 
-// Classes this firmware was actually built with. Zero until Phase 2 registers
-// class drivers -- an honest empty set, which the portable API is designed to
-// report rather than to hide behind an ImportError.
+// Classes this firmware was actually built with. Phase 1 left this at zero
+// pending class drivers; CDC, HID and MSC host drivers now exist (unconditionally,
+// under the same USBIF_HAVE_HOST gate), so an honest answer names those three --
+// MIDI/UAC/UVC host drivers don't exist yet, so those bits stay unset regardless
+// of what a caller asks host_start() for.
 static uint16_t usbif_supported_classes(void) {
+    #if USBIF_HAVE_HOST
+    return USBIF_CLASS_CDC | USBIF_CLASS_HID | USBIF_CLASS_MSC;
+    #else
     return 0;
+    #endif
 }
 
 static mp_obj_t usbif_classes_to_set(uint16_t mask) {
@@ -131,6 +138,30 @@ static mp_obj_t usbif_classes_to_set(uint16_t mask) {
         }
     }
     return set;
+}
+
+// Reverse of usbif_classes_to_set: an iterable of class-name strings (a tuple,
+// per the native_usb.py contract) to a bitmask. Unknown names are ignored
+// rather than raising -- host_start() intersects the result against
+// usbif_supported_classes() anyway, so an unrecognised or unsupported name
+// simply doesn't start, which is what "not built into this firmware" should
+// look like on the host side too (see NativeDevice.functions() for the same
+// philosophy on the device side).
+static uint16_t usbif_classes_from_iterable(mp_obj_t classes_in) {
+    size_t len;
+    mp_obj_t *items;
+    mp_obj_get_array(classes_in, &len, &items);
+    uint16_t mask = 0;
+    for (size_t j = 0; j < len; j++) {
+        qstr name = mp_obj_str_get_qstr(items[j]);
+        for (size_t i = 0; i < MP_ARRAY_SIZE(usbif_class_names); i++) {
+            if (usbif_class_names[i].name == name) {
+                mask |= usbif_class_names[i].bit;
+                break;
+            }
+        }
+    }
+    return mask;
 }
 
 static mp_obj_t usbif_capabilities(void) {
@@ -156,7 +187,10 @@ static mp_obj_t usbif_device_row(const usbif_event_t *event) {
 }
 
 static mp_obj_t usbif_host_start(mp_obj_t classes_in) {
-    (void)classes_in;  // honoured once class drivers exist
+    // Intersected against what this firmware can actually drive: a caller
+    // naming an unbuilt or unknown class doesn't start it, matching the
+    // return value ("the set actually started") that native_usb.py documents.
+    uint16_t wanted = usbif_classes_from_iterable(classes_in) & usbif_supported_classes();
     // Only a genuine start initialises the ring: a second host_start() on a
     // running host must be a no-op, not a wipe of queued events -- learned
     // when the NUCLEO's attach events vanished under an idempotent restart.
@@ -164,13 +198,14 @@ static mp_obj_t usbif_host_start(mp_obj_t classes_in) {
         usbif_rb_init(&usbif_events, usbif_event_slots, USBIF_EVENT_CAPACITY);
     }
     #if USBIF_HAVE_HOST
+    usbif_host_set_class_filter(wanted);
     int err = usbif_host_start_c();
     if (err != 0) {
         mp_raise_OSError(err > 0 ? err : MP_EIO);
     }
     #endif
     usbif_host_running = true;
-    return usbif_classes_to_set(usbif_supported_classes());
+    return usbif_classes_to_set(wanted);
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(usbif_host_start_obj, usbif_host_start);
 
