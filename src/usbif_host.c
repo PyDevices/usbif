@@ -80,6 +80,16 @@ static usbif_host_slot_t usbif_host_devs[USBIF_HOST_MAX_DEVS];
 static usb_host_client_handle_t usbif_host_client;
 static TaskHandle_t usbif_host_task_handle;
 static volatile bool usbif_host_task_running;
+// Set when usbif_host_stop_c()'s wait for the task to exit times out.
+// Once set, the task handle is known-zombie: it is stuck inside a blocking
+// IDF call (observed: usb_host_lib_handle_events() during the ALL_FREE
+// wait, when a device that was genuinely held open -- not merely opened
+// and immediately closed as a class-filter rejection -- is torn down) and
+// will not clear itself. Reboot is the only recovery currently known.
+// Recorded so usbif_host_start_c() can refuse loudly on a later call
+// instead of taking the non-NULL handle at face value and silently
+// pretending a fresh host actually (re)started.
+static volatile bool usbif_host_task_wedged;
 
 // Set by mod_usbif.c's host_start() before usbif_host_start_c() installs the
 // library, so it is always in place before the client callback can fire.
@@ -309,15 +319,36 @@ static void usbif_host_task(void *arg) {
     // Teardown, in the order the library requires: close what we opened,
     // walk away as a client, free the devices, and drain events until the
     // library confirms everything is gone.
+    printf("usbif_host: teardown starting\n");
     for (int i = 0; i < USBIF_HOST_MAX_DEVS; i++) {
         if (usbif_host_devs[i].in_use) {
             usb_host_device_close(usbif_host_client, usbif_host_devs[i].hdl);
             usbif_host_devs[i].in_use = false;
         }
     }
-    usb_host_client_deregister(usbif_host_client);
+    // Candidate fix, under test: usb_host_client_deregister() requires the
+    // client to have closed every device it opened (usb_host.h's own doc
+    // comment). usbif_host_on_new_dev() opens-then-immediately-closes any
+    // device that fails the class filter (including a bare hub, which never
+    // matches cdc/hid/msc/audio/midi/uvc) -- but that close is issued from
+    // inside a client-event callback, and its completion may not be fully
+    // retired by the library until usb_host_client_handle_events() is
+    // pumped again. The outer `while (usbif_host_task_running)` loop above
+    // has already exited by this point, so that pump was never happening.
+    // A short non-blocking drain here gives any such pending completion a
+    // chance to resolve before deregister is asked to confirm there are
+    // none outstanding.
+    for (int i = 0; i < 20; i++) {
+        uint32_t flags = 0;
+        usb_host_lib_handle_events(0, &flags);
+        usb_host_client_handle_events(usbif_host_client, 0);
+    }
+    printf("usbif_host: pre-deregister drain done\n");
+    esp_err_t dereg_err = usb_host_client_deregister(usbif_host_client);
+    printf("usbif_host: deregister -> 0x%x\n", (unsigned)dereg_err);
     usbif_host_client = NULL;
-    usb_host_device_free_all();
+    esp_err_t free_all_err = usb_host_device_free_all();
+    printf("usbif_host: device_free_all -> 0x%x\n", (unsigned)free_all_err);
     // Diagnostic instrumentation for the host_stop() hang investigation
     // (phase0-findings.md): does ALL_FREE actually arrive, or does this
     // loop silently exhaust its 100-tick (1000 ms) bound every time? The
@@ -345,6 +376,20 @@ static void usbif_host_task(void *arg) {
 }
 
 int usbif_host_start_c(void) {
+    if (usbif_host_task_wedged) {
+        // A previous host_stop() never actually finished -- the old task is
+        // still alive somewhere inside a blocking IDF call and holding the
+        // core-0 USB interrupt the host library needs. Silently returning 0
+        // here (the old behaviour) let every later host_start()/host_stop()
+        // pair "succeed" while doing nothing at the C level and reporting
+        // host_devices() as permanently empty -- a silent lie, not a no-op.
+        // Refuse instead: there is no known in-software recovery, only a
+        // reboot clears the wedge (verified: hard-reset restores clean
+        // host_stats()).
+        printf("usbif_host: refusing host_start() -- a previous host_stop() "
+               "never completed; the host task is wedged. Reboot required.\n");
+        return -1;
+    }
     if (usbif_host_task_handle != NULL) {
         return 0;
     }
@@ -419,8 +464,11 @@ void usbif_host_stop_c(void) {
     // itself is what's stuck" versus "the wait succeeded and something in
     // tusb_init()/the PHY handoff hangs regardless."
     bool task_exited = (usbif_host_task_handle == NULL);
+    if (!task_exited) {
+        usbif_host_task_wedged = true;
+    }
     printf("usbif_host_stop: task %s after %d tick(s) (%d ms)\n",
-        task_exited ? "exited cleanly" : "DID NOT EXIT -- timed out",
+        task_exited ? "exited cleanly" : "DID NOT EXIT -- timed out (marked wedged)",
         wait_ticks, wait_ticks * 10);
 
     #if MICROPY_HW_ENABLE_USBDEV
