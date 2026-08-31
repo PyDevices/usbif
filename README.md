@@ -19,8 +19,9 @@ directly and have no desktop counterpart yet.
 ## Status: early development
 
 **Nothing is released. Working today: sound card, MIDI instrument, HID
-keyboard and mouse, and a USB host that enumerates devices and speaks CDC,
-HID, and MSC — with the board's USB identity chosen at runtime from Python.**
+keyboard and mouse, removable drive, and a USB host that enumerates devices
+and speaks CDC, HID, and MSC — with the board's USB identity chosen at
+runtime from Python, in any of thirty-one combinations.**
 
 The flagship demo, real and audible: one ESP32 board on one cable was
 simultaneously the MIDI keyboard driving a DAW **and** the sound card
@@ -66,7 +67,10 @@ Also working, and the foundation the rest builds on:
 
 **Not yet working, said precisely:** UVC in either direction; MIDI as a
 *host* (the board as a MIDI device is the flagship above); audio as a host;
-hubs; and macOS
+hubs; a device-side drive backed by anything other than a buffer the
+application supplies (an SD card or flash partition would need block
+callbacks that reach hardware from the USB task, which is a design step, not
+an omission); and macOS
 desktop support, which sits at the [community-verified
 tier](https://github.com/PyDevices/.github/blob/main/docs/platform-support-tiers.md):
 no Mac is on this project's bench, `auto.py` returns a null backend there
