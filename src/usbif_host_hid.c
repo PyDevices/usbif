@@ -24,6 +24,7 @@
 #if defined(CONFIG_SOC_USB_OTG_SUPPORTED) && CONFIG_SOC_USB_OTG_SUPPORTED
 
 #include <string.h>
+#include <stdio.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -184,6 +185,44 @@ void usbif_hid_close(void) {
     usb_host_endpoint_clear(usbif_hid.dev, usbif_hid.ep_in);
     usb_host_transfer_free(usbif_hid.xfer_in);
     usb_host_interface_release(usbif_host_client_get(), usbif_hid.dev, usbif_hid.itf);
+}
+
+// Teardown-only variant for usbif_host.c's host_stop() path. The halt/flush
+// above are asynchronous in the IDF host library -- interface_release()
+// requires every endpoint's in-flight URB count back to zero, which only
+// happens once something pumps usb_host_client_handle_events(). The plain
+// usbif_hid_close() above relies on the host task's own main loop doing that
+// pumping concurrently in the background, which is true whenever Python
+// calls it live but is NOT true here: this runs from inside the host task
+// itself, after that task's own pump loop has already exited for
+// host_stop(). Found by testing, not review -- interface_release() and the
+// device_close() that follows both failed with ESP_ERR_INVALID_STATE
+// (0x103) without this. Safe to pump explicitly here specifically because
+// nothing else is pumping this client concurrently at this point -- doing
+// the same inside the plain close() above would race the still-running host
+// task loop during a live Python-initiated close.
+void usbif_hid_close_for_host_stop(void) {
+    if (!usbif_hid.open) {
+        printf("usbif_hid: close_for_host_stop -- was not open\n");
+        return;
+    }
+    usbif_hid.open = false;
+    vTaskDelay(pdMS_TO_TICKS(20));
+    printf("usbif_hid: halt\n");
+    usb_host_endpoint_halt(usbif_hid.dev, usbif_hid.ep_in);
+    printf("usbif_hid: flush\n");
+    usb_host_endpoint_flush(usbif_hid.dev, usbif_hid.ep_in);
+    printf("usbif_hid: clear\n");
+    usb_host_endpoint_clear(usbif_hid.dev, usbif_hid.ep_in);
+    printf("usbif_hid: pump loop\n");
+    for (int i = 0; i < 10; i++) {
+        usb_host_client_handle_events(usbif_host_client_get(), pdMS_TO_TICKS(10));
+    }
+    printf("usbif_hid: pump loop done\n");
+    usb_host_transfer_free(usbif_hid.xfer_in);
+    printf("usbif_hid: transfer_free done\n");
+    usb_host_interface_release(usbif_host_client_get(), usbif_hid.dev, usbif_hid.itf);
+    printf("usbif_hid: interface_release done\n");
 }
 
 void usbif_hid_on_dev_gone(usb_device_handle_t dev) {

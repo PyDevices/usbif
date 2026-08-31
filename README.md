@@ -78,12 +78,19 @@ rather than pretending, and a report from the field is what promotes it. And the
 class at a time; proven at full speed only (the ESP32-P4's high-speed host
 mode has an open defect, tracked in the findings); MSC reads blocks but is
 not mounted as a filesystem; HID delivers raw reports rather than decoded
-events; and `host_stop()` hangs on the S3 for a device that was genuinely
-held open, roughly 3 of 4 times in one session's sample -- a fix for the
-other case (a device rejected by the class filter and closed immediately)
-landed and is reliable, and a wedged host now raises `OSError` instead of
-silently pretending to keep working, but the underlying hang is not yet
-closed. `host_start()`'s class filter **is** now honoured -- verified both
+events; and `host_stop()` on a device that was genuinely held open is now
+reliable at realistic hold times (8 of 8 clean in this session's sample)
+after two rounds of fixes -- the teardown now closes each class driver's
+session properly instead of skipping straight to the raw device handle,
+and does so with the event-pump the library's async endpoint-halt/flush
+completions need, which nothing was providing once the host task's own
+main loop had already exited for shutdown. A narrower race remains at
+very short hold times (call `host_stop()` within a fraction of a second
+of opening a session and it can still wedge), root-caused to a single
+esp-idf call (`usb_host_endpoint_halt()`) blocking indefinitely -- a layer
+below anything in this module's own source, not yet closed. A wedged host
+now raises `OSError` instead of silently pretending to keep working
+either way. `host_start()`'s class filter **is** now honoured -- verified both
 in the intersection arithmetic and against a live device (excluded from a
 class tuple, it is invisible to `host_devices()`; included, it attaches) --
 and `capabilities()` reports the true built set (`{'cdc', 'hid', 'msc'}` on

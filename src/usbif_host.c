@@ -210,6 +210,11 @@ static void usbif_host_on_new_dev(uint8_t addr) {
 extern void usbif_cdc_on_dev_gone(usb_device_handle_t dev);
 extern void usbif_hid_on_dev_gone(usb_device_handle_t dev);
 extern void usbif_msc_on_dev_gone(usb_device_handle_t dev);
+extern void usbif_cdc_close(void);
+extern void usbif_hid_close(void);
+extern void usbif_msc_close(void);
+extern void usbif_cdc_close_for_host_stop(void);
+extern void usbif_hid_close_for_host_stop(void);
 
 static void usbif_host_on_dev_gone(usb_device_handle_t hdl) {
     usbif_cdc_on_dev_gone(hdl);
@@ -322,26 +327,88 @@ static void usbif_host_task(void *arg) {
     printf("usbif_host: teardown starting\n");
     for (int i = 0; i < USBIF_HOST_MAX_DEVS; i++) {
         if (usbif_host_devs[i].in_use) {
+            // A class driver that is genuinely open (e.g. HID's interrupt-IN
+            // transfer, which resubmits itself from its own completion
+            // callback until something clears its `open` flag) never learns
+            // host_stop() is happening if we go straight to device_close()
+            // -- the transfer keeps re-arming forever, the device can never
+            // go idle, and usb_host_device_free_all()'s async completion
+            // (what the ALL_FREE wait below is blocking on) never arrives.
+            //
+            // The FIRST fix attempt called usbif_*_on_dev_gone() here, the
+            // same hooks the surprise-detach path uses -- wrong choice,
+            // caught by testing rather than review: those hooks free the
+            // transfer object without first halting/flushing/clearing its
+            // endpoint, which is correct for a detach (the device is
+            // already physically gone, so endpoint operations on it would
+            // be meaningless) but leaves the library's internal state
+            // inconsistent when the device is still attached, which then
+            // surfaced downstream as usb_host_client_deregister() failing
+            // with ESP_ERR_INVALID_STATE (0x103) instead of the hang moving
+            // anywhere. The device IS still attached here -- host_stop() is
+            // a voluntary teardown, not a detach -- so the correct call is
+            // each driver's ordinary _close(), which does halt+flush+clear
+            // before freeing, exactly as if Python had closed it itself.
+            // SECOND fix attempt: the plain _close() functions still failed
+            // identically even with real wall-clock time in the
+            // pre-deregister drain below. Root cause, found by reading
+            // esp-idf's usb_host.c directly rather than guessing further:
+            // usb_host_endpoint_halt()/flush() are themselves asynchronous
+            // -- interface_release() refuses (ESP_ERR_INVALID_STATE) until
+            // every endpoint's in-flight URB count is back to zero, and
+            // that only happens once something pumps
+            // usb_host_client_handle_events(). Live, that's always the host
+            // task's own main loop running concurrently in the background;
+            // here, that loop has already exited, so nothing pumps it
+            // between halt/flush and interface_release inside the plain
+            // close(). The _for_host_stop() variants pump explicitly in
+            // that exact gap -- safe here specifically because nothing else
+            // is servicing this client concurrently at this point. MSC's
+            // plain close() needs no variant: its transfers are
+            // request/response, not continuously re-armed, so there is no
+            // in-flight URB at rest for interface_release() to wait on.
+            // Diagnostic bracketing (phase0-findings.md): an intermittent
+            // hang still shows up roughly 1-in-4 with no printf between
+            // "teardown starting" and "pre-deregister drain done" at all,
+            // meaning it moved somewhere inside these three calls or the
+            // device_close() below rather than being eliminated. Bracket
+            // each one so the next hang pins an exact call, not a region.
+            printf("usbif_host: closing cdc\n");
+            usbif_cdc_close_for_host_stop();
+            printf("usbif_host: closing hid\n");
+            usbif_hid_close_for_host_stop();
+            printf("usbif_host: closing msc\n");
+            usbif_msc_close();
+            printf("usbif_host: device_close\n");
             usb_host_device_close(usbif_host_client, usbif_host_devs[i].hdl);
+            printf("usbif_host: device_close returned\n");
             usbif_host_devs[i].in_use = false;
         }
     }
-    // Candidate fix, under test: usb_host_client_deregister() requires the
-    // client to have closed every device it opened (usb_host.h's own doc
-    // comment). usbif_host_on_new_dev() opens-then-immediately-closes any
-    // device that fails the class filter (including a bare hub, which never
-    // matches cdc/hid/msc/audio/midi/uvc) -- but that close is issued from
-    // inside a client-event callback, and its completion may not be fully
-    // retired by the library until usb_host_client_handle_events() is
-    // pumped again. The outer `while (usbif_host_task_running)` loop above
-    // has already exited by this point, so that pump was never happening.
-    // A short non-blocking drain here gives any such pending completion a
-    // chance to resolve before deregister is asked to confirm there are
-    // none outstanding.
+    // usb_host_client_deregister() requires the client to have closed every
+    // device it opened (usb_host.h's own doc comment), and a class driver's
+    // close() (or usbif_host_on_new_dev()'s open-then-immediately-close of a
+    // class-filter reject) issues endpoint halt/flush/clear and interface
+    // release calls whose completions are asynchronous -- retired only when
+    // usb_host_lib_handle_events()/usb_host_client_handle_events() are
+    // pumped. The outer `while (usbif_host_task_running)` loop above has
+    // already exited by this point, so nothing pumps them otherwise.
+    //
+    // This drain's first version used timeout=0 on every call -- a
+    // non-blocking poll, 20 times with no delay between them, done in
+    // microseconds. That is fast enough to catch a completion already
+    // sitting in the queue (the class-filter-reject case, fixed by this
+    // version), but gives the hardware no wall-clock time to actually
+    // finish halting/flushing/clearing a live, previously-open endpoint --
+    // caught by testing with a genuinely-open device, where deregister and
+    // device_free_all both came back ESP_ERR_INVALID_STATE (0x103) even
+    // after routing through the correct close() calls above. Real waits,
+    // not a zero-timeout spin, up to 200 ms total -- generous next to the
+    // ALL_FREE wait below, cheap next to a wedge.
     for (int i = 0; i < 20; i++) {
         uint32_t flags = 0;
-        usb_host_lib_handle_events(0, &flags);
-        usb_host_client_handle_events(usbif_host_client, 0);
+        usb_host_lib_handle_events(pdMS_TO_TICKS(10), &flags);
+        usb_host_client_handle_events(usbif_host_client, pdMS_TO_TICKS(10));
     }
     printf("usbif_host: pre-deregister drain done\n");
     esp_err_t dereg_err = usb_host_client_deregister(usbif_host_client);

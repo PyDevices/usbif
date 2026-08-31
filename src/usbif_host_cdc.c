@@ -252,6 +252,28 @@ void usbif_cdc_close(void) {
     usb_host_interface_release(usbif_host_client_get(), usbif_cdc.dev, usbif_cdc.data_itf);
 }
 
+// Teardown-only variant -- see usbif_hid_close_for_host_stop()'s comment in
+// usbif_host_hid.c for the full reasoning. Same asynchronous halt/flush,
+// same host-task-has-no-concurrent-pump problem when called from inside
+// usbif_host_task()'s own teardown rather than live from Python.
+void usbif_cdc_close_for_host_stop(void) {
+    if (!usbif_cdc.open) {
+        return;
+    }
+    usbif_cdc.open = false;
+    vTaskDelay(pdMS_TO_TICKS(20));
+    usb_host_endpoint_halt(usbif_cdc.dev, usbif_cdc.ep_in);
+    usb_host_endpoint_flush(usbif_cdc.dev, usbif_cdc.ep_in);
+    usb_host_endpoint_clear(usbif_cdc.dev, usbif_cdc.ep_in);
+    for (int i = 0; i < 10; i++) {
+        usb_host_client_handle_events(usbif_host_client_get(), pdMS_TO_TICKS(10));
+    }
+    usb_host_transfer_free(usbif_cdc.xfer_in);
+    usb_host_transfer_free(usbif_cdc.xfer_out);
+    usb_host_transfer_free(usbif_cdc.xfer_ctrl);
+    usb_host_interface_release(usbif_host_client_get(), usbif_cdc.dev, usbif_cdc.data_itf);
+}
+
 // Called by usbif_host.c when a device disappears mid-session.
 void usbif_cdc_on_dev_gone(usb_device_handle_t dev) {
     if (!usbif_cdc.open || usbif_cdc.dev != dev) {
