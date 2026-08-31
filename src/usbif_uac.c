@@ -80,7 +80,7 @@ static bool usbif_uac_streaming;
 // make it the default output, route system audio to it, and then stall its
 // audio engine when nothing aboard is draining the stream -- observed on
 // Windows as the whole desktop backing up, keyboard included.
-extern bool usbif_ext_enabled;   // owned by usbif_desc.c
+extern uint16_t usbif_fn_get(void);   // owned by usbif_desc.c
 
 uint32_t usbif_uac_get_reqs;
 uint32_t usbif_uac_set_reqs;
@@ -93,7 +93,7 @@ bool usbif_uac_is_streaming(void) {
 }
 
 bool usbif_uac_is_enabled(void) {
-    return usbif_ext_enabled;
+    return (usbif_fn_get() & (1u << 2)) != 0;   // USBIF_FN_AUDIO
 }
 
 // Called by usbif_desc.c on an advertise/withdraw toggle (overrides its weak).

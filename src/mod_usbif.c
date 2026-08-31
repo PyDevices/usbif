@@ -27,10 +27,18 @@
 #include "usbif_classes.h"
 
 // From usbif_desc.c, present on any build with the TinyUSB extension
-// header -- audio or not.
+// header. The USB identity is chosen at runtime from these bits.
 #if defined(MICROPY_HW_USB_EXT_TUSB_CONFIG) && MICROPY_HW_ENABLE_USBDEV
-extern bool usbif_ext_is_enabled(void);
-extern void usbif_ext_set_enabled(bool enable);
+#define USBIF_HAVE_FN (1)
+extern uint16_t usbif_fn_get(void);
+extern uint16_t usbif_fn_built(void);
+extern int usbif_fn_set(uint16_t mask);
+#define USBIF_FN_CDC   (1u << 0)
+#define USBIF_FN_MSC   (1u << 1)
+#define USBIF_FN_AUDIO (1u << 2)
+#define USBIF_FN_MIDI  (1u << 3)
+#else
+#define USBIF_HAVE_FN (0)
 #endif
 
 // Host engine availability: the IDF USB Host Library, on chips with an OTG
@@ -338,11 +346,20 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_volume_obj, usbif_uac_volume);
 // Advertise the audio function to the host, or stop advertising it. The board
 // re-enumerates either way -- USB has no way to change identity in place.
 static mp_obj_t usbif_uac_enable(size_t n_args, const mp_obj_t *args) {
-    #if defined(MICROPY_HW_USB_EXT_TUSB_CONFIG) && MICROPY_HW_ENABLE_USBDEV
+    #if USBIF_HAVE_FN
+    // Compatibility surface over the general one: "the audio function, on
+    // or off, leaving every other function as it is."
     if (n_args) {
-        usbif_ext_set_enabled(mp_obj_is_true(args[0]));
+        uint16_t mask = usbif_fn_get();
+        if (mp_obj_is_true(args[0])) {
+            mask |= (uint16_t)(USBIF_FN_AUDIO | USBIF_FN_MIDI);
+            mask &= usbif_fn_built();
+        } else {
+            mask &= (uint16_t) ~(USBIF_FN_AUDIO | USBIF_FN_MIDI);
+        }
+        usbif_fn_set(mask);
     }
-    return mp_obj_new_bool(usbif_ext_is_enabled());
+    return mp_obj_new_bool((usbif_fn_get() & USBIF_FN_AUDIO) != 0);
     #else
     (void)n_args;
     (void)args;
@@ -673,7 +690,44 @@ static mp_obj_t usbif_dev_reinit(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_dev_reinit_obj, usbif_dev_reinit);
 
+// The USB identity, as a bitmask of functions. Called with no argument it
+// reports what is advertised; with an argument it re-enumerates the board
+// wearing exactly that set. Asking for a function this firmware was not
+// built with is an error rather than a silent omission.
+static mp_obj_t usbif_dev_functions(size_t n_args, const mp_obj_t *args) {
+    #if USBIF_HAVE_FN
+    if (n_args) {
+        mp_int_t mask = mp_obj_get_int(args[0]);
+        if (mask < 0 || usbif_fn_set((uint16_t)mask) != 0) {
+            mp_raise_ValueError(MP_ERROR_TEXT("function not built into this firmware"));
+        }
+    }
+    return mp_obj_new_int_from_uint(usbif_fn_get());
+    #else
+    (void)n_args;
+    (void)args;
+    return MP_OBJ_NEW_SMALL_INT(0);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_dev_functions_obj, 0, 1, usbif_dev_functions);
+
+// Which functions this firmware can advertise at all.
+static mp_obj_t usbif_dev_functions_built(void) {
+    #if USBIF_HAVE_FN
+    return mp_obj_new_int_from_uint(usbif_fn_built());
+    #else
+    return MP_OBJ_NEW_SMALL_INT(0);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_dev_functions_built_obj, usbif_dev_functions_built);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_dev_functions), MP_ROM_PTR(&usbif_dev_functions_obj) },
+    { MP_ROM_QSTR(MP_QSTR_dev_functions_built), MP_ROM_PTR(&usbif_dev_functions_built_obj) },
+    { MP_ROM_QSTR(MP_QSTR_FN_CDC), MP_ROM_INT(1) },
+    { MP_ROM_QSTR(MP_QSTR_FN_MSC), MP_ROM_INT(2) },
+    { MP_ROM_QSTR(MP_QSTR_FN_AUDIO), MP_ROM_INT(4) },
+    { MP_ROM_QSTR(MP_QSTR_FN_MIDI), MP_ROM_INT(8) },
     { MP_ROM_QSTR(MP_QSTR_uac_enable), MP_ROM_PTR(&usbif_uac_enable_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_start), MP_ROM_PTR(&usbif_uac_pump_start_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_stop), MP_ROM_PTR(&usbif_uac_pump_stop_obj) },
