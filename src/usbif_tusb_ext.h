@@ -31,6 +31,10 @@
 // give it numbers and space. Both functions appear and disappear together
 // through the same runtime opt-in the audio function uses.
 #define CFG_TUD_MIDI (1)
+// HID as a device: a keyboard, a mouse, or whatever report descriptor an
+// application wants. One interface, one interrupt IN endpoint.
+#define CFG_TUD_HID (1)
+#define CFG_TUD_HID_EP_BUFSIZE (16)
 #define CFG_TUD_MIDI_RX_BUFSIZE (TUD_OPT_HIGH_SPEED ? 512 : 64)
 #define CFG_TUD_MIDI_TX_BUFSIZE (TUD_OPT_HIGH_SPEED ? 512 : 64)
 
@@ -67,13 +71,18 @@
 #define USBD_EP_MIDI_OUT (USBIF_EPNUM_MIDI)
 #define USBD_EP_MIDI_IN (0x80 | USBIF_EPNUM_MIDI)
 
+// HID follows MIDI: one interface, one interrupt IN endpoint.
+#define USBD_ITF_HID (USBD_ITF_MIDI + 2)
+#define USBIF_EPNUM_HID (USBIF_EPNUM_MIDI + 1)
+#define USBD_EP_HID_IN (0x80 | USBIF_EPNUM_HID)
+
 // The audio function occupies two interfaces (AudioControl and
 // AudioStreaming) and MIDI two more, which the bounds below must cover so
 // runtime_dev_open keeps declining everything the built-in descriptor owns.
 #undef USBD_ITF_BUILTIN_MAX
-#define USBD_ITF_BUILTIN_MAX (USBD_ITF_MIDI + 2)
+#define USBD_ITF_BUILTIN_MAX (USBD_ITF_HID + 1)
 #undef USBD_EP_BUILTIN_MAX
-#define USBD_EP_BUILTIN_MAX (USBIF_EPNUM_MIDI + 1)
+#define USBD_EP_BUILTIN_MAX (USBIF_EPNUM_HID + 1)
 
 // --- Audio function sizing, following TinyUSB's own uac2_speaker_fb example.
 //
@@ -196,6 +205,13 @@
 // but that is a runtime property now: usbif_desc.c strips this IAD when
 // the assembled costume turns out to hold only one function. So it is
 // always compiled in, and always the first thing in the MIDI block.
+// The HID report descriptor's length is needed by the configuration
+// descriptor at compile time. Computed from the same macros that build it
+// in usbif_hid_dev.c, so the two cannot drift.
+#define USBIF_HID_REPORT_DESC_LEN \
+    (sizeof((uint8_t[]){ TUD_HID_REPORT_DESC_KEYBOARD(HID_REPORT_ID(1)), \
+                         TUD_HID_REPORT_DESC_MOUSE(HID_REPORT_ID(2)) }))
+
 #define USBIF_MIDI_IAD_LEN (8)
 #define USBIF_MIDI_IAD \
     8, TUSB_DESC_INTERFACE_ASSOCIATION, USBD_ITF_MIDI, 2, \
@@ -203,9 +219,9 @@
     AUDIO_FUNC_PROTOCOL_CODE_UNDEF, 0,
 
 #if USBIF_EXT_AUDIO
-#define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_AUDIO_SPEAKER_STEREO_FB_DESC_LEN + USBIF_MIDI_IAD_LEN + TUD_MIDI_DESC_LEN)
+#define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_AUDIO_SPEAKER_STEREO_FB_DESC_LEN + USBIF_MIDI_IAD_LEN + TUD_MIDI_DESC_LEN + TUD_HID_DESC_LEN)
 #else
-#define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_MIDI_IAD_LEN + TUD_MIDI_DESC_LEN)
+#define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_MIDI_IAD_LEN + TUD_MIDI_DESC_LEN + TUD_HID_DESC_LEN)
 #endif
 // High speed counts in 125 us microframes, so bInterval 4 gives the 1 ms
 // feedback refresh the class expects; full speed counts in 1 ms frames, where
@@ -220,10 +236,15 @@
     /*_stridx*/ 0,                                     \
     /*_epout*/ USBD_EP_MIDI_OUT,                       \
     /*_epin*/ USBD_EP_MIDI_IN,                         \
-    /*_epsize*/ 64),   // FS-legal everywhere; 512 is HS-only and an
-                       // FS host must reject it -- which a dark MIDI box
-                       // proved. Speed-aware descriptor service is the
-                       // proper fix, recorded as debt.
+    /*_epsize*/ 64),                                   \
+    TUD_HID_DESCRIPTOR(                                \
+    /*_itfnum*/ USBD_ITF_HID,                          \
+    /*_stridx*/ 0,                                     \
+    /*_boot_protocol*/ HID_ITF_PROTOCOL_NONE,          \
+    /*_report_desc_len*/ USBIF_HID_REPORT_DESC_LEN,    \
+    /*_epin*/ USBD_EP_HID_IN,                          \
+    /*_epsize*/ CFG_TUD_HID_EP_BUFSIZE,                \
+    /*_ep_interval*/ 10),
 #else
 #define MICROPY_HW_USB_EXT_DESC_CFG                    \
     USBIF_AUDIO_SPEAKER_STEREO_FB_DESCRIPTOR(          \
@@ -241,10 +262,15 @@
     /*_stridx*/ 0,                                     \
     /*_epout*/ USBD_EP_MIDI_OUT,                       \
     /*_epin*/ USBD_EP_MIDI_IN,                         \
-    /*_epsize*/ 64),   // FS-legal everywhere; 512 is HS-only and an
-                       // FS host must reject it -- which a dark MIDI box
-                       // proved. Speed-aware descriptor service is the
-                       // proper fix, recorded as debt.
+    /*_epsize*/ 64),                                   \
+    TUD_HID_DESCRIPTOR(                                \
+    /*_itfnum*/ USBD_ITF_HID,                          \
+    /*_stridx*/ 0,                                     \
+    /*_boot_protocol*/ HID_ITF_PROTOCOL_NONE,          \
+    /*_report_desc_len*/ USBIF_HID_REPORT_DESC_LEN,    \
+    /*_epin*/ USBD_EP_HID_IN,                          \
+    /*_epsize*/ CFG_TUD_HID_EP_BUFSIZE,                \
+    /*_ep_interval*/ 10),
 #endif // USBIF_EXT_AUDIO
 
 #endif // USBIF_TUSB_EXT_H

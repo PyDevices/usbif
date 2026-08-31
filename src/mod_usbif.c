@@ -37,6 +37,7 @@ extern int usbif_fn_set(uint16_t mask);
 #define USBIF_FN_MSC   (1u << 1)
 #define USBIF_FN_AUDIO (1u << 2)
 #define USBIF_FN_MIDI  (1u << 3)
+#define USBIF_FN_HID   (1u << 4)
 #else
 #define USBIF_HAVE_FN (0)
 #endif
@@ -724,13 +725,48 @@ static mp_obj_t usbif_dev_functions_built(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_dev_functions_built_obj, usbif_dev_functions_built);
 
+// Submit one HID input report. Returns False when the host is not ready
+// for it -- not mounted, or it has not polled since the last one -- which
+// a caller should treat as "try again", not as an error.
+static mp_obj_t usbif_hid_send_py(mp_obj_t id_in, mp_obj_t buf_in) {
+    #if defined(CFG_TUD_HID) && CFG_TUD_HID
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_READ);
+    extern bool usbif_hid_send(uint8_t report_id, const uint8_t *data, uint16_t len);
+    return mp_obj_new_bool(usbif_hid_send((uint8_t)mp_obj_get_int(id_in),
+        (const uint8_t *)buf.buf, (uint16_t)buf.len));
+    #else
+    (void)id_in;
+    (void)buf_in;
+    return mp_const_false;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(usbif_hid_send_obj, usbif_hid_send_py);
+
+// The keyboard LED state the host last set (caps lock and friends), for a
+// control surface that wants to show it.
+static mp_obj_t usbif_hid_leds_py(void) {
+    #if defined(CFG_TUD_HID) && CFG_TUD_HID
+    extern uint8_t usbif_hid_get_leds(void);
+    return MP_OBJ_NEW_SMALL_INT(usbif_hid_get_leds());
+    #else
+    return MP_OBJ_NEW_SMALL_INT(0);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_hid_leds_obj, usbif_hid_leds_py);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_hid_send), MP_ROM_PTR(&usbif_hid_send_obj) },
+    { MP_ROM_QSTR(MP_QSTR_hid_leds), MP_ROM_PTR(&usbif_hid_leds_obj) },
+    { MP_ROM_QSTR(MP_QSTR_HID_KEYBOARD), MP_ROM_INT(1) },
+    { MP_ROM_QSTR(MP_QSTR_HID_MOUSE), MP_ROM_INT(2) },
     { MP_ROM_QSTR(MP_QSTR_dev_functions), MP_ROM_PTR(&usbif_dev_functions_obj) },
     { MP_ROM_QSTR(MP_QSTR_dev_functions_built), MP_ROM_PTR(&usbif_dev_functions_built_obj) },
     { MP_ROM_QSTR(MP_QSTR_FN_CDC), MP_ROM_INT(1) },
     { MP_ROM_QSTR(MP_QSTR_FN_MSC), MP_ROM_INT(2) },
     { MP_ROM_QSTR(MP_QSTR_FN_AUDIO), MP_ROM_INT(4) },
     { MP_ROM_QSTR(MP_QSTR_FN_MIDI), MP_ROM_INT(8) },
+    { MP_ROM_QSTR(MP_QSTR_FN_HID), MP_ROM_INT(16) },
     { MP_ROM_QSTR(MP_QSTR_uac_enable), MP_ROM_PTR(&usbif_uac_enable_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_start), MP_ROM_PTR(&usbif_uac_pump_start_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_stop), MP_ROM_PTR(&usbif_uac_pump_stop_obj) },
