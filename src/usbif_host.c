@@ -318,15 +318,29 @@ static void usbif_host_task(void *arg) {
     usb_host_client_deregister(usbif_host_client);
     usbif_host_client = NULL;
     usb_host_device_free_all();
+    // Diagnostic instrumentation for the host_stop() hang investigation
+    // (phase0-findings.md): does ALL_FREE actually arrive, or does this
+    // loop silently exhaust its 100-tick (1000 ms) bound every time? The
+    // original code proceeded to usb_host_uninstall() either way with no
+    // record of which happened -- that silence is exactly what made the
+    // outer hang unfalsifiable from the Python side.
+    bool all_free_seen = false;
+    int free_wait_ticks = 0;
     for (int i = 0; i < 100; i++) {
         uint32_t flags = 0;
         usb_host_lib_handle_events(pdMS_TO_TICKS(10), &flags);
+        free_wait_ticks = i + 1;
         if (flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+            all_free_seen = true;
             break;
         }
     }
-    usb_host_uninstall();
+    printf("usbif_host: ALL_FREE %s after %d tick(s) (%d ms)\n",
+        all_free_seen ? "seen" : "NOT seen -- timed out", free_wait_ticks, free_wait_ticks * 10);
+    esp_err_t uninstall_err = usb_host_uninstall();
+    printf("usbif_host: uninstall -> 0x%x\n", (unsigned)uninstall_err);
     usbif_host_task_handle = NULL;
+    printf("usbif_host: task exiting, handle cleared, core %d\n", esp_cpu_get_core_id());
     vTaskDelete(NULL);
 }
 
@@ -389,17 +403,34 @@ void usbif_host_stop_c(void) {
         return;
     }
     usbif_host_task_running = false;
+    int wait_ticks = 0;
     for (int i = 0; i < 200 && usbif_host_task_handle != NULL; i++) {
         vTaskDelay(1);   // one 10 ms tick; pdMS_TO_TICKS(5) is ZERO ticks here
+        wait_ticks = i + 1;
     }
     // The task uninstalled the library itself before exiting: the HCD
     // interrupt lives on the task's core and is freed there.
+    //
+    // Diagnostic instrumentation for the host_stop() hang investigation
+    // (phase0-findings.md hypothesis 1): the original code called
+    // tusb_init() unconditionally here with no record of whether the wait
+    // above actually succeeded or timed out. Log it explicitly so a hang
+    // report can be told apart from "the wait timed out and tusb_init()
+    // itself is what's stuck" versus "the wait succeeded and something in
+    // tusb_init()/the PHY handoff hangs regardless."
+    bool task_exited = (usbif_host_task_handle == NULL);
+    printf("usbif_host_stop: task %s after %d tick(s) (%d ms)\n",
+        task_exited ? "exited cleanly" : "DID NOT EXIT -- timed out",
+        wait_ticks, wait_ticks * 10);
 
     #if MICROPY_HW_ENABLE_USBDEV
     // Hand the controller back: device-mode PHY, then the TinyUSB device
     // stack. The board is a CDC device again on its next connection.
+    printf("usbif_host_stop: calling usb_phy_otg_device_mode()\n");
     usb_phy_otg_device_mode();
+    printf("usbif_host_stop: calling tusb_init()\n");
     tusb_init();
+    printf("usbif_host_stop: tusb_init() returned\n");
     #endif
 }
 
