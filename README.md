@@ -95,13 +95,14 @@ in the intersection arithmetic and against a live device (excluded from a
 class tuple, it is invisible to `host_devices()`; included, it attaches) --
 and `capabilities()` reports the true built set (`{'cdc', 'hid', 'msc'}` on
 the S3 bench build) rather than the empty set it silently returned since
-Phase 1. One board-configuration finding worth restating here: the
-"thirty-one costumes" result is P4-specific -- it needs all five device
-functions compiled in, and the stock `ESP32_GENERIC_S3` board build used
-for this session's host work does not enable `MICROPY_HW_USB_MSC`, so the
-device-side costume count on that exact build is fifteen (2^4 - 1, no MSC),
-not thirty-one; enabling it is a board-configuration decision, not a module
-limitation, per the same distinction already drawn for the P4 case above.
+Phase 1. One board-configuration finding worth restating here, now
+resolved: the stock `ESP32_GENERIC_S3` board build did not enable
+`MICROPY_HW_USB_MSC`, so a first pass of testing found the S3 could only
+reach fifteen of the thirty-one costumes (missing MSC) -- a
+board-configuration gap, not a module limitation, exactly like the same
+distinction already drawn for the P4. The `cmods` board patch for the S3
+now enables it too (matching the P4's own patch), and
+`examples/costume_selftest.py` confirms **31 of 31** on the S3 as well.
 All are recorded in [`docs/phase0-findings.md`](docs/phase0-findings.md).
 The plan and the evidence behind every decision are in [`docs/`](docs/).
 
