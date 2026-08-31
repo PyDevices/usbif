@@ -781,7 +781,88 @@ static mp_obj_t usbif_dev_pid(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_dev_pid_obj, usbif_dev_pid);
 
+// Offer a buffer to the host as a removable drive. The buffer's contents
+// are whatever the application put there -- usually a FAT image the board
+// built and then unmounted.
+//
+// The object is held in a VM root pointer while attached, so the collector
+// cannot free memory the USB task is still serving to a host. Without that
+// root, an application that dropped its own reference would leave the C
+// side reading freed memory on every host read -- a fault that would
+// present as corrupted files rather than as a crash, which is worse.
+//
+// The rule the firmware cannot enforce: do not mount this locally while a
+// host has it. Two writers on one filesystem is a corrupted filesystem.
+static mp_obj_t usbif_msc_attach_py(size_t n_args, const mp_obj_t *args) {
+    #if defined(CFG_TUD_MSC) && CFG_TUD_MSC
+    extern int usbif_msc_attach(uint8_t *buf, size_t len, bool writable);
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(args[0], &buf, MP_BUFFER_WRITE);
+    const bool writable = (n_args < 2) || mp_obj_is_true(args[1]);
+    if (usbif_msc_attach((uint8_t *)buf.buf, buf.len, writable) != 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("buffer smaller than one 512-byte block"));
+    }
+    MP_STATE_VM(usbif_msc_obj) = args[0];
+    return mp_const_none;
+    #else
+    (void)n_args;
+    (void)args;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_msc_attach_obj, 1, 2, usbif_msc_attach_py);
+
+static mp_obj_t usbif_msc_detach_py(void) {
+    #if defined(CFG_TUD_MSC) && CFG_TUD_MSC
+    extern void usbif_msc_detach(void);
+    usbif_msc_detach();
+    // Drop the root only after the C side has stopped pointing at it.
+    MP_STATE_VM(usbif_msc_obj) = MP_OBJ_NULL;
+    #endif
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_msc_detach_obj, usbif_msc_detach_py);
+
+// (attached, blocks, ejected). `ejected` goes true when the host says it
+// has finished with the medium -- the signal to wait for before mounting
+// the same buffer locally again.
+static mp_obj_t usbif_msc_status(void) {
+    #if defined(CFG_TUD_MSC) && CFG_TUD_MSC
+    extern bool usbif_msc_is_attached(void);
+    extern bool usbif_msc_was_ejected(void);
+    extern uint32_t usbif_msc_block_count(void);
+    mp_obj_t items[3] = {
+        mp_obj_new_bool(usbif_msc_is_attached()),
+        mp_obj_new_int_from_uint(usbif_msc_block_count()),
+        mp_obj_new_bool(usbif_msc_was_ejected()),
+    };
+    return mp_obj_new_tuple(3, items);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_msc_status_obj, usbif_msc_status);
+
+// The buffer currently attached, or None. The VM root keeps it alive
+// across anything the application does with its own references -- including
+// a soft reset -- so this is how a board gets its drive back after the host
+// has finished writing to it, which is the whole point of the workflow:
+// attach, let the host write, wait for the eject, take it back and mount it.
+static mp_obj_t usbif_msc_buffer(void) {
+    #if defined(CFG_TUD_MSC) && CFG_TUD_MSC
+    mp_obj_t o = MP_STATE_VM(usbif_msc_obj);
+    return o == MP_OBJ_NULL ? mp_const_none : o;
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_msc_buffer_obj, usbif_msc_buffer);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_msc_attach), MP_ROM_PTR(&usbif_msc_attach_obj) },
+    { MP_ROM_QSTR(MP_QSTR_msc_detach), MP_ROM_PTR(&usbif_msc_detach_obj) },
+    { MP_ROM_QSTR(MP_QSTR_msc_status), MP_ROM_PTR(&usbif_msc_status_obj) },
+    { MP_ROM_QSTR(MP_QSTR_msc_buffer), MP_ROM_PTR(&usbif_msc_buffer_obj) },
     { MP_ROM_QSTR(MP_QSTR_dev_pid), MP_ROM_PTR(&usbif_dev_pid_obj) },
     { MP_ROM_QSTR(MP_QSTR_dev_desc_check), MP_ROM_PTR(&usbif_dev_desc_check_obj) },
     { MP_ROM_QSTR(MP_QSTR_hid_send), MP_ROM_PTR(&usbif_hid_send_obj) },
@@ -830,6 +911,21 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_dev_reinit), MP_ROM_PTR(&usbif_dev_reinit_obj) },
 };
 static MP_DEFINE_CONST_DICT(usbif_module_globals, usbif_module_globals_table);
+
+// Keeps the attached MSC buffer alive for as long as the USB task may read
+// it, independently of whether the application still holds a reference.
+MP_REGISTER_ROOT_POINTER(mp_obj_t usbif_msc_obj);
+
+#if defined(CFG_TUD_MSC) && CFG_TUD_MSC
+// Consulted by usbif_msc_dev.c before every host access. A soft reset
+// clears the VM's root pointers, freeing the buffer while the USB task
+// still holds its address; without this the host would read reused memory
+// and see corrupted files rather than an error. The drive reports "no
+// medium" instead, which is both true and something hosts handle.
+bool usbif_msc_root_alive(void) {
+    return MP_STATE_VM(usbif_msc_obj) != MP_OBJ_NULL;
+}
+#endif
 
 const mp_obj_module_t usbif_user_cmodule = {
     .base = { &mp_type_module },
