@@ -633,6 +633,40 @@ static mp_obj_t usbif_midi_read(mp_obj_t buf_in) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(usbif_midi_read_obj, usbif_midi_read);
 
+// Device-side USB state, straight from TinyUSB: (connected, mounted,
+// suspended). connected = a host's bus reset was seen; mounted = the host
+// configured us. The first question when nothing enumerates is which of
+// those never happened.
+static mp_obj_t usbif_dev_state(void) {
+    #if MICROPY_HW_ENABLE_USBDEV
+    mp_obj_t items[3] = {
+        mp_obj_new_bool(tud_connected()),
+        mp_obj_new_bool(tud_mounted()),
+        mp_obj_new_bool(tud_suspended()),
+    };
+    return mp_obj_new_tuple(3, items);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_dev_state_obj, usbif_dev_state);
+
+// (was_inited, init_ok): whether TinyUSB was already up, and what a fresh
+// tusb_init() says. Distinguishes "boot init silently failed" from
+// "initialised but no bus".
+static mp_obj_t usbif_dev_reinit(void) {
+    #if MICROPY_HW_ENABLE_USBDEV
+    bool was = tud_inited();
+    bool ok = tusb_init();
+    tud_connect();
+    mp_obj_t items[2] = { mp_obj_new_bool(was), mp_obj_new_bool(ok) };
+    return mp_obj_new_tuple(2, items);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_dev_reinit_obj, usbif_dev_reinit);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_uac_enable), MP_ROM_PTR(&usbif_uac_enable_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_start), MP_ROM_PTR(&usbif_uac_pump_start_obj) },
@@ -665,6 +699,8 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_msc_close), MP_ROM_PTR(&usbif_host_msc_close_obj) },
     { MP_ROM_QSTR(MP_QSTR_midi_write), MP_ROM_PTR(&usbif_midi_write_obj) },
     { MP_ROM_QSTR(MP_QSTR_midi_read), MP_ROM_PTR(&usbif_midi_read_obj) },
+    { MP_ROM_QSTR(MP_QSTR_dev_state), MP_ROM_PTR(&usbif_dev_state_obj) },
+    { MP_ROM_QSTR(MP_QSTR_dev_reinit), MP_ROM_PTR(&usbif_dev_reinit_obj) },
 };
 static MP_DEFINE_CONST_DICT(usbif_module_globals, usbif_module_globals_table);
 

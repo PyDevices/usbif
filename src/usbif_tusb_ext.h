@@ -17,7 +17,15 @@
 #ifndef USBIF_TUSB_EXT_H
 #define USBIF_TUSB_EXT_H
 
-#define CFG_TUD_AUDIO (1)
+// The audio function can be excluded to present a slim CDC+MIDI composite:
+// purpose-built embedded MIDI hosts (the kind in a hardware synth box) often
+// carry enumeration buffers smaller than our full three-function descriptor,
+// and have no use for an isochronous audio function anyway. Default off for
+// the slim-descriptor experiment; boards that want the sound card set it.
+#ifndef USBIF_EXT_AUDIO
+#define USBIF_EXT_AUDIO (0)
+#endif
+#define CFG_TUD_AUDIO (USBIF_EXT_AUDIO)
 // And a USB MIDI function beside it: TinyUSB carries the whole class
 // (descriptor macro, jack plumbing, tud_midi_* API); this file only has to
 // give it numbers and space. Both functions appear and disappear together
@@ -49,8 +57,13 @@
 // MIDI sits after the audio function: its descriptor also spans two
 // interfaces (an AudioControl stub and MIDIStreaming), with one bulk
 // endpoint pair.
+#if USBIF_EXT_AUDIO
 #define USBD_ITF_MIDI (USBD_ITF_AUDIO + 2)
 #define USBIF_EPNUM_MIDI (USBIF_EPNUM_AUDIO + 1)
+#else
+#define USBD_ITF_MIDI (USBD_ITF_AUDIO)
+#define USBIF_EPNUM_MIDI (USBIF_EPNUM_AUDIO)
+#endif
 #define USBD_EP_MIDI_OUT (USBIF_EPNUM_MIDI)
 #define USBD_EP_MIDI_IN (0x80 | USBIF_EPNUM_MIDI)
 
@@ -172,12 +185,40 @@
 // String index 0: the function is left unnamed so that no entry has to be
 // added to MicroPython's string table, which would be a third hook for
 // cosmetic benefit. Hosts fall back to the device product string.
-#define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_AUDIO_SPEAKER_STEREO_FB_DESC_LEN + TUD_MIDI_DESC_LEN)
+// The MIDI function needs its own Interface Association Descriptor: the
+// device already announces itself as an IAD composite (CDC's doing), and
+// on such devices Windows requires every function grouped by one.
+// TinyUSB's TUD_MIDI_DESCRIPTOR ships without it; the audio descriptor
+// that worked leads with its own IAD, which is the tell.
+#define USBIF_MIDI_IAD_LEN (8)
+#define USBIF_MIDI_IAD \
+    8, TUSB_DESC_INTERFACE_ASSOCIATION, USBD_ITF_MIDI, 2, \
+    TUSB_CLASS_AUDIO, AUDIO_SUBCLASS_MIDI_STREAMING, \
+    AUDIO_FUNC_PROTOCOL_CODE_UNDEF, 0,
+
+#if USBIF_EXT_AUDIO
+#define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_AUDIO_SPEAKER_STEREO_FB_DESC_LEN + USBIF_MIDI_IAD_LEN + TUD_MIDI_DESC_LEN)
+#else
+#define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_MIDI_IAD_LEN + TUD_MIDI_DESC_LEN)
+#endif
 // High speed counts in 125 us microframes, so bInterval 4 gives the 1 ms
 // feedback refresh the class expects; full speed counts in 1 ms frames, where
 // that is bInterval 1.
 #define USBIF_AUDIO_FB_INTERVAL (TUD_OPT_HIGH_SPEED ? 4 : 1)
 
+#if !USBIF_EXT_AUDIO
+#define MICROPY_HW_USB_EXT_DESC_CFG                    \
+    USBIF_MIDI_IAD                                     \
+    TUD_MIDI_DESCRIPTOR(                               \
+    /*_itfnum*/ USBD_ITF_MIDI,                         \
+    /*_stridx*/ 0,                                     \
+    /*_epout*/ USBD_EP_MIDI_OUT,                       \
+    /*_epin*/ USBD_EP_MIDI_IN,                         \
+    /*_epsize*/ 64),   // FS-legal everywhere; 512 is HS-only and an
+                       // FS host must reject it -- which a dark MIDI box
+                       // proved. Speed-aware descriptor service is the
+                       // proper fix, recorded as debt.
+#else
 #define MICROPY_HW_USB_EXT_DESC_CFG                    \
     USBIF_AUDIO_SPEAKER_STEREO_FB_DESCRIPTOR(          \
     /*_itfnum*/ USBD_ITF_AUDIO,                        \
@@ -188,11 +229,16 @@
     /*_epoutsize*/ CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX, \
     /*_epfb*/ USBD_EP_AUDIO_FB,                        \
     /*_epfbsize*/ 4),                                  \
+    USBIF_MIDI_IAD                                     \
     TUD_MIDI_DESCRIPTOR(                               \
     /*_itfnum*/ USBD_ITF_MIDI,                         \
     /*_stridx*/ 0,                                     \
     /*_epout*/ USBD_EP_MIDI_OUT,                       \
     /*_epin*/ USBD_EP_MIDI_IN,                         \
-    /*_epsize*/ (TUD_OPT_HIGH_SPEED ? 512 : 64)),
+    /*_epsize*/ 64),   // FS-legal everywhere; 512 is HS-only and an
+                       // FS host must reject it -- which a dark MIDI box
+                       // proved. Speed-aware descriptor service is the
+                       // proper fix, recorded as debt.
+#endif // USBIF_EXT_AUDIO
 
 #endif // USBIF_TUSB_EXT_H
