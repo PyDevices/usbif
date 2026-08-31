@@ -10,8 +10,11 @@ keyboard, thumb drive, MIDI controller or camera plugs into.
 thin, stable Python surface that higher-level packages build on. The portable
 API ships separately, as `lib/usbif` in
 [`pydevices`](https://github.com/PyDevices/pydevices), and is implemented twice
-— once by this module and once by desktop backends over OS services — so an
-application written against it runs unchanged on a workstation.
+— once by this module and once by desktop backends over OS services. That
+portability covers enumeration, device identity and hot-plug events today, so
+an application that observes devices runs unchanged on a workstation; the
+streaming surfaces (MIDI bytes, the audio pump) are reached through `_usbif`
+directly and have no desktop counterpart yet.
 
 ## Status: early development
 
@@ -52,16 +55,24 @@ Also working, and the foundation the rest builds on:
 - the portable API and its Linux and Windows desktop backends, in `pydevices`
   (`lib/usbif`), with one conformance suite run against every backend
 - the event transport in C (`src/shared/usbif_ringbuf.c`), with host-side tests
-- three small patches to MicroPython (`patches/`), each with provenance: a
-  `tusb_config.h` hook, a configuration-descriptor hook, and two weak hooks
-  that let this module vary what it advertises at runtime
+- four small patches to MicroPython (`patches/`), each with provenance: a
+  `tusb_config.h` hook, a configuration-descriptor hook, three weak hooks that
+  let this module vary what it advertises at runtime, and an esp32 helper that
+  lets it borrow the OTG controller for host duty
 
 **Not yet working, said precisely:** UVC in either direction; MIDI as a
 *host* (the board as a MIDI device is the flagship above); audio as a host;
-hubs. And the working host side carries honest limits for now: one session
-per class at a time, proven at full speed (the ESP32-P4's high-speed host
-mode has an open defect, tracked in the findings), and `host_start()`'s
-class filter is accepted but not yet honoured. The plan and the evidence
+hubs; HID as a *device* (the board as a keyboard or control surface -- the
+host direction works, the device direction has no function yet); and macOS
+desktop support, for the honest reason that nobody in this project has a Mac
+to test on -- the portable API's shape does not exclude it, and `auto.py`
+returns a null backend there rather than pretending. And the working host side carries honest limits for now: one session per
+class at a time; proven at full speed only (the ESP32-P4's high-speed host
+mode has an open defect, tracked in the findings); `host_start()`'s class
+filter is accepted but not yet honoured; MSC reads blocks but is not mounted
+as a filesystem; HID delivers raw reports rather than decoded events;
+`host_stop()` hangs on the S3; and a surprise detach leaks its transfer
+objects. All are recorded in [`docs/phase0-findings.md`](docs/phase0-findings.md). The plan and the evidence
 behind every decision are in [`docs/`](docs/).
 
 ## Why the events are drained rather than delivered
@@ -88,14 +99,37 @@ silence, because the mechanism it replaces failed silently.
 
 ## Building
 
-The module follows the standard MicroPython external C module contract, so it
-needs nothing from this workspace:
+The module follows the standard MicroPython external C module contract, and
+`micropython.mk` covers the Make-based ports. Two steps come first, though,
+and skipping them builds a module whose USB functions are silently absent
+rather than one that fails loudly:
+
+1. **Apply the patches.** The device functions reach the host through hooks
+   this module adds to MicroPython's shared TinyUSB glue, and the host side
+   needs the esp32 OTG helper:
+
+   ```bash
+   ./apply_patches.sh --apply      # --status to check, --revert to undo
+   ```
+
+2. **Point the board at the extension header**, by adding this line to your
+   board's `mpconfigboard.h` (see `patches/` for the ESP32_GENERIC_P4 and
+   ESP32_GENERIC_S3 versions, which are carried as board patches because the
+   line is board integration rather than module code):
+
+   ```c
+   #define MICROPY_HW_USB_EXT_TUSB_CONFIG "usbif_tusb_ext.h"
+   ```
+
+Then build as usual:
 
 ```bash
 idf.py -D MICROPY_BOARD=ESP32_GENERIC_S3 -D USER_C_MODULES=/path/to/usbif/micropython.cmake build
 ```
 
-`micropython.mk` covers the Make-based ports. One caution learned the hard way
+Without both steps the build succeeds and the board simply enumerates without
+audio or MIDI -- quiet rather than obviously broken, which is why it is
+called out here. One caution learned the hard way
 and filed upstream as
 [micropython#19667](https://github.com/micropython/micropython/issues/19667):
 do not pass `BUILD=` to the esp32 port's `make`. It propagates into the
