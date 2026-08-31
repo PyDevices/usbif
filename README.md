@@ -44,9 +44,13 @@ Also working, and the foundation the rest builds on:
   `tusb_config.h` hook, a configuration-descriptor hook, and two weak hooks
   that let this module vary what it advertises at runtime
 
-**Not yet working:** USB host of any kind (HID, MSC, CDC-ACM), MIDI in either
-direction, and UVC. Host work is next and needs OTG adapters. The plan and the
-evidence behind every decision are in [`docs/`](docs/).
+**Not yet working, said precisely:** UVC in either direction; MIDI as a
+*host* (the board as a MIDI device is the flagship above); audio as a host;
+hubs. And the working host side carries honest limits for now: one session
+per class at a time, proven at full speed (the ESP32-P4's high-speed host
+mode has an open defect, tracked in the findings), and `host_start()`'s
+class filter is accepted but not yet honoured. The plan and the evidence
+behind every decision are in [`docs/`](docs/).
 
 ## Why the events are drained rather than delivered
 
