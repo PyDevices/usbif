@@ -18,6 +18,7 @@ target_sources(usermod_usbif INTERFACE
     ${USBIF_SRC_DIR}/usbif_host.c
     ${USBIF_SRC_DIR}/usbif_host_cdc.c
     ${USBIF_SRC_DIR}/usbif_host_hid.c
+    ${USBIF_SRC_DIR}/usbif_host_msc.c
     ${USBIF_SRC_DIR}/shared/usbif_ringbuf.c
 )
 

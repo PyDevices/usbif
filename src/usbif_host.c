@@ -176,10 +176,12 @@ static void usbif_host_on_new_dev(uint8_t addr) {
 
 extern void usbif_cdc_on_dev_gone(usb_device_handle_t dev);
 extern void usbif_hid_on_dev_gone(usb_device_handle_t dev);
+extern void usbif_msc_on_dev_gone(usb_device_handle_t dev);
 
 static void usbif_host_on_dev_gone(usb_device_handle_t hdl) {
     usbif_cdc_on_dev_gone(hdl);
     usbif_hid_on_dev_gone(hdl);
+    usbif_msc_on_dev_gone(hdl);
     for (int i = 0; i < USBIF_HOST_MAX_DEVS; i++) {
         usbif_host_slot_t *slot = &usbif_host_devs[i];
         if (slot->in_use && slot->hdl == hdl) {

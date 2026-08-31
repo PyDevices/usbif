@@ -15,6 +15,7 @@
 #include "py/runtime.h"
 #include "py/obj.h"
 #include "py/mperrno.h"
+#include <string.h>
 
 #include "shared/usbif_ringbuf.h"
 
@@ -56,6 +57,10 @@ extern uint32_t usbif_cdc_rx_dropped(void);
 extern int usbif_hid_open(uint32_t dev_id);
 extern int usbif_hid_read(uint8_t *out, size_t max);
 extern void usbif_hid_close(void);
+extern int usbif_msc_open(uint32_t dev_id);
+extern int usbif_msc_info(uint32_t *num_blocks, uint32_t *block_size, const char **inquiry);
+extern int usbif_msc_read_block(uint32_t lba, uint8_t *out, size_t max);
+extern void usbif_msc_close(void);
 #else
 #define USBIF_HAVE_HOST (0)
 #endif
@@ -532,6 +537,64 @@ static mp_obj_t usbif_host_hid_close_py(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_hid_close_obj, usbif_host_hid_close_py);
 
+static mp_obj_t usbif_host_msc_open(mp_obj_t dev_id_in) {
+    #if USBIF_HAVE_HOST
+    if (usbif_msc_open((uint32_t)mp_obj_get_int(dev_id_in)) != 0) {
+        mp_raise_OSError(MP_EIO);
+    }
+    #else
+    (void)dev_id_in;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(usbif_host_msc_open_obj, usbif_host_msc_open);
+
+// (num_blocks, block_size, inquiry_string)
+static mp_obj_t usbif_host_msc_info(void) {
+    #if USBIF_HAVE_HOST
+    uint32_t blocks, bs;
+    const char *inq;
+    if (usbif_msc_info(&blocks, &bs, &inq) != 0) {
+        mp_raise_OSError(MP_EIO);
+    }
+    mp_obj_t items[3] = {
+        mp_obj_new_int_from_uint(blocks),
+        mp_obj_new_int_from_uint(bs),
+        mp_obj_new_str(inq, strlen(inq)),
+    };
+    return mp_obj_new_tuple(3, items);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_msc_info_obj, usbif_host_msc_info);
+
+static mp_obj_t usbif_host_msc_read(mp_obj_t lba_in, mp_obj_t buf_in) {
+    #if USBIF_HAVE_HOST
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_WRITE);
+    int n = usbif_msc_read_block((uint32_t)mp_obj_get_int(lba_in), (uint8_t *)buf.buf, buf.len);
+    if (n < 0) {
+        mp_raise_OSError(MP_EIO);
+    }
+    return MP_OBJ_NEW_SMALL_INT(n);
+    #else
+    (void)lba_in;
+    (void)buf_in;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(usbif_host_msc_read_obj, usbif_host_msc_read);
+
+static mp_obj_t usbif_host_msc_close_py(void) {
+    #if USBIF_HAVE_HOST
+    usbif_msc_close();
+    #endif
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_msc_close_obj, usbif_host_msc_close_py);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_uac_enable), MP_ROM_PTR(&usbif_uac_enable_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_start), MP_ROM_PTR(&usbif_uac_pump_start_obj) },
@@ -558,6 +621,10 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_hid_open), MP_ROM_PTR(&usbif_host_hid_open_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_hid_read), MP_ROM_PTR(&usbif_host_hid_read_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_hid_close), MP_ROM_PTR(&usbif_host_hid_close_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_msc_open), MP_ROM_PTR(&usbif_host_msc_open_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_msc_info), MP_ROM_PTR(&usbif_host_msc_info_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_msc_read), MP_ROM_PTR(&usbif_host_msc_read_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_msc_close), MP_ROM_PTR(&usbif_host_msc_close_obj) },
 };
 static MP_DEFINE_CONST_DICT(usbif_module_globals, usbif_module_globals_table);
 
