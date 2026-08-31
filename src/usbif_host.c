@@ -232,13 +232,16 @@ static void usbif_host_task(void *arg) {
         // Levels 1-3: what TinyUSB's own esp32 glue requests for the same
         // controller.
         .intr_flags = ESP_INTR_FLAG_LOWMED,
-        // BIT1 = the HS controller, explicitly. The header says a map of 0
-        // defaults to the High-Speed peripheral on HS-capable targets; the
-        // code says `map == 0 ? BIT0` -- the FS controller, whose INT PHY
-        // belongs to USB-Serial-JTAG on this chip, which presents as
-        // "selected PHY is in use". BIT1 selects the controller on the
-        // connector and the UTMI PHY the device stack just released.
+        // On dual-controller chips (P4): BIT1 = the HS controller,
+        // explicitly. The header says a map of 0 defaults to the High-Speed
+        // peripheral on HS-capable targets; the code says `map == 0 ? BIT0`
+        // -- the FS controller, whose INT PHY belongs to USB-Serial-JTAG
+        // there, presenting as "selected PHY is in use". On single-
+        // controller chips (S3) BIT1 names hardware that does not exist and
+        // install fails with ESP_ERR_INVALID_ARG, so the default stands.
+        #if defined(CONFIG_SOC_USB_OTG_PERIPH_NUM) && CONFIG_SOC_USB_OTG_PERIPH_NUM > 1
         .peripheral_map = BIT1,
+        #endif
     };
     esp_err_t err = usb_host_install(&config);
     printf("usbif_host: install -> 0x%x\n", (unsigned)err);
