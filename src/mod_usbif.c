@@ -215,11 +215,20 @@ static MP_DEFINE_CONST_FUN_OBJ_1(usbif_host_drain_obj, usbif_host_drain);
 // and it is invisible from the host side -- Windows reports "cannot start"
 // either way.
 static mp_obj_t usbif_builtin_desc_cfg(void) {
+    // Only USB-device ports have a built-in descriptor to show; on desktop
+    // backends (unix, windows) the honest answer is None, same shape as the
+    // other capability-gated accessors. Unguarded, this reference broke
+    // every desktop build in the workspace -- caught by the first unix
+    // engine rebuild after usbif joined the USER_C_MODULES glob.
+    #if MICROPY_HW_ENABLE_USBDEV
     mp_obj_t items[2] = {
         mp_obj_new_bytes(mp_usbd_builtin_desc_cfg, MP_USBD_BUILTIN_DESC_CFG_LEN),
         MP_OBJ_NEW_SMALL_INT(MP_USBD_BUILTIN_DESC_CFG_LEN),
     };
     return mp_obj_new_tuple(2, items);
+    #else
+    return mp_const_none;
+    #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_builtin_desc_cfg_obj, usbif_builtin_desc_cfg);
 
