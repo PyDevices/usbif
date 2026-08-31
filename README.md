@@ -76,12 +76,27 @@ tier](https://github.com/PyDevices/.github/blob/main/docs/platform-support-tiers
 no Mac is on this project's bench, `auto.py` returns a null backend there
 rather than pretending, and a report from the field is what promotes it. And the working host side carries honest limits for now: one session per
 class at a time; proven at full speed only (the ESP32-P4's high-speed host
-mode has an open defect, tracked in the findings); `host_start()`'s class
-filter is accepted but not yet honoured; MSC reads blocks but is not mounted
-as a filesystem; HID delivers raw reports rather than decoded events; and
-`host_stop()` hangs on the S3. All are recorded in
-[`docs/phase0-findings.md`](docs/phase0-findings.md). The plan and the evidence
-behind every decision are in [`docs/`](docs/).
+mode has an open defect, tracked in the findings); MSC reads blocks but is
+not mounted as a filesystem; HID delivers raw reports rather than decoded
+events; and `host_stop()` hangs on the S3 for a device that was genuinely
+held open, roughly 3 of 4 times in one session's sample -- a fix for the
+other case (a device rejected by the class filter and closed immediately)
+landed and is reliable, and a wedged host now raises `OSError` instead of
+silently pretending to keep working, but the underlying hang is not yet
+closed. `host_start()`'s class filter **is** now honoured -- verified both
+in the intersection arithmetic and against a live device (excluded from a
+class tuple, it is invisible to `host_devices()`; included, it attaches) --
+and `capabilities()` reports the true built set (`{'cdc', 'hid', 'msc'}` on
+the S3 bench build) rather than the empty set it silently returned since
+Phase 1. One board-configuration finding worth restating here: the
+"thirty-one costumes" result is P4-specific -- it needs all five device
+functions compiled in, and the stock `ESP32_GENERIC_S3` board build used
+for this session's host work does not enable `MICROPY_HW_USB_MSC`, so the
+device-side costume count on that exact build is fifteen (2^4 - 1, no MSC),
+not thirty-one; enabling it is a board-configuration decision, not a module
+limitation, per the same distinction already drawn for the P4 case above.
+All are recorded in [`docs/phase0-findings.md`](docs/phase0-findings.md).
+The plan and the evidence behind every decision are in [`docs/`](docs/).
 
 ## Why the events are drained rather than delivered
 
