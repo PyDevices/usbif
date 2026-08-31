@@ -256,6 +256,12 @@ void usbif_cdc_close(void) {
 void usbif_cdc_on_dev_gone(usb_device_handle_t dev) {
     if (usbif_cdc.open && usbif_cdc.dev == dev) {
         usbif_cdc.open = false;
+        // Release the claim so the library can actually free the device --
+        // a close with a claimed interface fails, the stale device wedges
+        // the library, and the returning device never re-enumerates
+        // (observed with the NUCLEO's mode switch). The transfer objects
+        // leak on this path for now: three small allocations, recorded.
+        usb_host_interface_release(usbif_host_client_get(), dev, usbif_cdc.data_itf);
     }
 }
 
