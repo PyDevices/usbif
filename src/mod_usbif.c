@@ -768,7 +768,21 @@ static mp_obj_t usbif_dev_desc_check(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_dev_desc_check_obj, usbif_dev_desc_check);
 
+// The product id the current costume presents. Each combination of
+// functions is its own product, so a host's cached driver set always
+// matches what it is looking at.
+static mp_obj_t usbif_dev_pid(void) {
+    #if USBIF_HAVE_FN
+    extern uint16_t usbif_desc_pid(void);
+    return mp_obj_new_int_from_uint(usbif_desc_pid());
+    #else
+    return MP_OBJ_NEW_SMALL_INT(0);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_dev_pid_obj, usbif_dev_pid);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_dev_pid), MP_ROM_PTR(&usbif_dev_pid_obj) },
     { MP_ROM_QSTR(MP_QSTR_dev_desc_check), MP_ROM_PTR(&usbif_dev_desc_check_obj) },
     { MP_ROM_QSTR(MP_QSTR_hid_send), MP_ROM_PTR(&usbif_hid_send_obj) },
     { MP_ROM_QSTR(MP_QSTR_hid_leds), MP_ROM_PTR(&usbif_hid_leds_obj) },

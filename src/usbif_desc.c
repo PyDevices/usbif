@@ -285,6 +285,28 @@ static void usbif_build_desc(void) {
         usbif_desc_dev.bDeviceSubClass = 0x00;
         usbif_desc_dev.bDeviceProtocol = 0x00;
     }
+
+    // Each costume is its own product. TinyUSB's own header explains why,
+    // and it is worth quoting because it describes exactly what runtime
+    // function selection would otherwise do wrong:
+    //
+    //   "A combination of interfaces must have a unique product id, since
+    //    PC will save device driver after the first plug. Same VID/PID with
+    //    different interface e.g MSC (first), then CDC (later) will possibly
+    //    cause system error on PC."
+    //
+    // MicroPython derives that product id from the *compile-time* class set,
+    // which is right for a fixed identity and wrong for ours: fifteen
+    // costumes would share one, and a host that cached drivers against the
+    // first would meet fourteen impostors. So the same bitmap is computed
+    // from the functions actually being advertised, extended with the audio
+    // bit the upstream macro leaves commented out.
+    usbif_desc_dev.idProduct = (uint16_t)(0x4000
+        | ((usbif_fn_enabled & USBIF_FN_CDC) ? (1u << 0) : 0)
+        | ((usbif_fn_enabled & USBIF_FN_MSC) ? (1u << 1) : 0)
+        | ((usbif_fn_enabled & USBIF_FN_HID) ? (1u << 2) : 0)
+        | ((usbif_fn_enabled & USBIF_FN_MIDI) ? (1u << 3) : 0)
+        | ((usbif_fn_enabled & USBIF_FN_AUDIO) ? (1u << 4) : 0));
 }
 
 const uint8_t *mp_usbd_builtin_desc_cfg_get(void) {
@@ -436,6 +458,11 @@ int usbif_desc_check(void) {
         }
     }
     return 0;
+}
+
+uint16_t usbif_desc_pid(void) {
+    usbif_build_desc();
+    return usbif_desc_dev.idProduct;
 }
 
 uint16_t usbif_fn_get(void) {
