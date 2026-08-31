@@ -248,10 +248,14 @@ void usbif_msc_close(void) {
 }
 
 void usbif_msc_on_dev_gone(usb_device_handle_t dev) {
-    if (usbif_msc.open && usbif_msc.dev == dev) {
-        usbif_msc.open = false;
-        usb_host_interface_release(usbif_host_client_get(), dev, usbif_msc.itf);
+    if (!usbif_msc.open || usbif_msc.dev != dev) {
+        return;
     }
+    usbif_msc.open = false;
+    usb_host_interface_release(usbif_host_client_get(), dev, usbif_msc.itf);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    usb_host_transfer_free(usbif_msc.xfer);
+    usbif_msc.xfer = NULL;
 }
 
 #endif // CONFIG_SOC_USB_OTG_SUPPORTED

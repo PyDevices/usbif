@@ -187,14 +187,18 @@ void usbif_hid_close(void) {
 }
 
 void usbif_hid_on_dev_gone(usb_device_handle_t dev) {
-    if (usbif_hid.open && usbif_hid.dev == dev) {
-        usbif_hid.open = false;
-        // Release the claim so the library can actually free the device --
-        // holding it is what wedged re-enumeration after the first
-        // surprise detach. The transfer objects leak on this path for
-        // now; they are three small allocations and a recorded debt.
-        usb_host_interface_release(usbif_host_client_get(), dev, usbif_hid.itf);
+    if (!usbif_hid.open || usbif_hid.dev != dev) {
+        return;
     }
+    // Same order as the CDC driver: stop the callbacks resubmitting, release
+    // the claim so the library can free the device (holding it is what
+    // wedged re-enumeration after the first surprise detach), let any queued
+    // callback drain, then free.
+    usbif_hid.open = false;
+    usb_host_interface_release(usbif_host_client_get(), dev, usbif_hid.itf);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    usb_host_transfer_free(usbif_hid.xfer_in);
+    usbif_hid.xfer_in = NULL;
 }
 
 uint32_t usbif_hid_rx_dropped(void) {

@@ -33,6 +33,7 @@
 extern uint16_t usbif_fn_get(void);
 extern uint16_t usbif_fn_built(void);
 extern int usbif_fn_set(uint16_t mask);
+extern int usbif_desc_check(void);
 #define USBIF_FN_CDC   (1u << 0)
 #define USBIF_FN_MSC   (1u << 1)
 #define USBIF_FN_AUDIO (1u << 2)
@@ -755,7 +756,20 @@ static mp_obj_t usbif_hid_leds_py(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_hid_leds_obj, usbif_hid_leds_py);
 
+// Structural check of the descriptor the current costume produces: 0 when
+// sound, or a negative code naming the fault. A host finds these by
+// refusing the device; this finds them in microseconds.
+static mp_obj_t usbif_dev_desc_check(void) {
+    #if USBIF_HAVE_FN
+    return MP_OBJ_NEW_SMALL_INT(usbif_desc_check());
+    #else
+    return MP_OBJ_NEW_SMALL_INT(0);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_dev_desc_check_obj, usbif_dev_desc_check);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_dev_desc_check), MP_ROM_PTR(&usbif_dev_desc_check_obj) },
     { MP_ROM_QSTR(MP_QSTR_hid_send), MP_ROM_PTR(&usbif_hid_send_obj) },
     { MP_ROM_QSTR(MP_QSTR_hid_leds), MP_ROM_PTR(&usbif_hid_leds_obj) },
     { MP_ROM_QSTR(MP_QSTR_HID_KEYBOARD), MP_ROM_INT(1) },

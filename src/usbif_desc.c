@@ -93,18 +93,25 @@ typedef struct {
     // theoretical: an audio-only costume with its IAD stripped enumerated
     // and then bound no driver at all.
     bool iad_strippable;
+    // Whether this function's class *requires* an interface association to
+    // be legal. UAC2 and CDC do -- their control and data interfaces are
+    // only grouped by it. MIDI 1.0 and single-interface functions do not.
+    // A block that requires one and lost it is malformed in a way no
+    // internal-consistency check can see, because the device class is
+    // derived to match and the result looks self-consistent.
+    bool iad_required;
 } usbif_fn_block_t;
 
 // Order matters: it is the order the blocks are emitted, and therefore the
 // order interfaces are numbered.
 static const usbif_fn_block_t usbif_blocks[] = {
-    { USBIF_FN_CDC,   USBIF_OFF_CDC,   USBIF_LEN_CDC,   2, false },
-    { USBIF_FN_MSC,   USBIF_OFF_MSC,   USBIF_LEN_MSC,   1, false },
-    { USBIF_FN_AUDIO, USBIF_OFF_AUDIO, USBIF_LEN_AUDIO, 2, false },
-    { USBIF_FN_MIDI,  USBIF_OFF_MIDI,  USBIF_LEN_MIDI,  2, true  },
+    { USBIF_FN_CDC,   USBIF_OFF_CDC,   USBIF_LEN_CDC,   2, false, true  },
+    { USBIF_FN_MSC,   USBIF_OFF_MSC,   USBIF_LEN_MSC,   1, false, false },
+    { USBIF_FN_AUDIO, USBIF_OFF_AUDIO, USBIF_LEN_AUDIO, 2, false, true  },
+    { USBIF_FN_MIDI,  USBIF_OFF_MIDI,  USBIF_LEN_MIDI,  2, true,  false },
     // HID is a single interface and carries no association of its own, so
     // there is nothing to strip and nothing that requires one.
-    { USBIF_FN_HID,   USBIF_OFF_HID,   USBIF_LEN_HID,   1, false },
+    { USBIF_FN_HID,   USBIF_OFF_HID,   USBIF_LEN_HID,   1, false, false },
 };
 
 // The advertised set. Empty at boot by design: a board that always
@@ -119,6 +126,12 @@ static const usbif_fn_block_t usbif_blocks[] = {
 #endif
 
 static uint16_t usbif_fn_enabled = MICROPY_HW_USB_EXT_BOOT_FUNCTIONS;
+// Where each emitted block landed, recorded by the assembler so the
+// validator can check class policy against the bytes rather than
+// re-deriving which function produced which interface.
+static uint16_t usbif_emit_off[5];
+static const usbif_fn_block_t *usbif_emit_blk[5];
+static uint8_t usbif_emit_n;
 static uint8_t usbif_desc_buf[MP_USBD_BUILTIN_DESC_CFG_LEN];
 static uint8_t usbif_itf_count;
 static tusb_desc_device_t usbif_desc_dev;
@@ -198,6 +211,7 @@ static void usbif_build_desc(void) {
     uint8_t itf = 0;
     uint8_t fn_count = 0;
     const usbif_fn_block_t *only = NULL;
+    usbif_emit_n = 0;
 
     memcpy(usbif_desc_buf, mp_usbd_builtin_desc_cfg, TUD_CONFIG_DESC_LEN);
 
@@ -208,6 +222,9 @@ static void usbif_build_desc(void) {
         }
         fn_count++;
         only = b;
+        usbif_emit_off[usbif_emit_n] = out;
+        usbif_emit_blk[usbif_emit_n] = b;
+        usbif_emit_n++;
         memcpy(usbif_desc_buf + out, mp_usbd_builtin_desc_cfg + b->offset, b->len);
         // The compile-time descriptor numbered this block's interfaces from
         // its own position; move them to where it actually landed. The first
@@ -290,6 +307,135 @@ uint8_t mp_usbd_builtin_itf_max(void) {
         usbif_build_desc();
     }
     return usbif_itf_count;
+}
+
+// Structural validation of whatever the assembler just produced. A host
+// discovers a malformed descriptor by refusing the device, days later and
+// with no explanation; this finds the same faults in microseconds and says
+// which one. Returns 0 when sound, or a negative code naming the fault --
+// the codes are API, since a test script reports them.
+//
+// Written because the assembler's arithmetic is the kind that looks right:
+// the bug that shipped an audio costume binding no driver was a policy
+// mistake, but the next one will be an off-by-one in a renumbering walk.
+int usbif_desc_check(void) {
+    usbif_build_desc();
+    const uint16_t total = (uint16_t)(usbif_desc_buf[2] | (usbif_desc_buf[3] << 8));
+    if (total < TUD_CONFIG_DESC_LEN || total > MP_USBD_BUILTIN_DESC_CFG_LEN) {
+        return -1;      // wTotalLength outside the buffer it describes
+    }
+
+    uint8_t seen_itf[32];
+    memset(seen_itf, 0, sizeof(seen_itf));
+    uint8_t highest_itf = 0;
+    bool any_itf = false;
+    uint16_t off = TUD_CONFIG_DESC_LEN;
+    uint8_t cur_class = 0;
+
+    while (off < total) {
+        const uint8_t *d = usbif_desc_buf + off;
+        const uint8_t dlen = d[0];
+        if (dlen < 2) {
+            return -2;                  // zero-length descriptor: walk would hang
+        }
+        if (off + dlen > total) {
+            return -3;                  // descriptor runs past wTotalLength
+        }
+        switch (d[1]) {
+            case TUSB_DESC_INTERFACE:
+                if (dlen < 9) {
+                    return -4;
+                }
+                if (d[2] >= sizeof(seen_itf)) {
+                    return -5;          // interface number out of any sane range
+                }
+                seen_itf[d[2]] = 1;
+                if (!any_itf || d[2] > highest_itf) {
+                    highest_itf = d[2];
+                }
+                any_itf = true;
+                cur_class = d[5];
+                break;
+            case TUSB_DESC_INTERFACE_ASSOCIATION:
+                if (dlen < 8) {
+                    return -6;
+                }
+                if ((uint16_t)d[2] + d[3] > sizeof(seen_itf)) {
+                    return -7;          // association spans past the range
+                }
+                break;
+            case TUSB_DESC_CS_INTERFACE:
+                // The sibling references the assembler rewrites must land on
+                // interfaces that exist.
+                if (cur_class == TUSB_CLASS_CDC && dlen >= 5) {
+                    if (d[2] == CDC_FUNC_DESC_CALL_MANAGEMENT && d[4] >= sizeof(seen_itf)) {
+                        return -8;
+                    }
+                    if (d[2] == CDC_FUNC_DESC_UNION
+                        && (d[3] >= sizeof(seen_itf) || d[4] >= sizeof(seen_itf))) {
+                        return -9;
+                    }
+                } else if (cur_class == TUSB_CLASS_AUDIO && dlen >= 9 && d[2] == 0x01
+                           && d[3] == 0x00 && d[4] == 0x01) {
+                    const uint8_t n = d[7];
+                    for (uint8_t i = 0; i < n && 8u + i < dlen; i++) {
+                        if (d[8 + i] >= sizeof(seen_itf)) {
+                            return -10;
+                        }
+                    }
+                }
+                break;
+            default:
+                break;
+        }
+        off = (uint16_t)(off + dlen);
+    }
+
+    if (off != total) {
+        return -11;                     // descriptors do not tile wTotalLength
+    }
+    if (!any_itf) {
+        return -12;                     // a configuration with no interfaces
+    }
+    // Interface numbers must be dense from zero: a gap means a block was
+    // renumbered against the wrong base, which hosts reject in ways that
+    // look like anything but arithmetic.
+    for (uint8_t i = 0; i <= highest_itf; i++) {
+        if (!seen_itf[i]) {
+            return -13;
+        }
+    }
+    if (usbif_desc_buf[4] != (uint8_t)(highest_itf + 1)) {
+        return -14;                     // bNumInterfaces disagrees with content
+    }
+    // The class-specific references above are checked for range; the device
+    // descriptor's composite claim must match what was emitted.
+    bool has_iad = false;
+    for (uint16_t o = TUD_CONFIG_DESC_LEN; o < total; o = (uint16_t)(o + usbif_desc_buf[o])) {
+        if (usbif_desc_buf[o + 1] == TUSB_DESC_INTERFACE_ASSOCIATION) {
+            has_iad = true;
+            break;
+        }
+    }
+    if (has_iad != (usbif_desc_dev.bDeviceClass == TUSB_CLASS_MISC)) {
+        return -15;                     // device class disagrees with the IADs
+    }
+    // Class policy, which internal consistency cannot see: a function whose
+    // class requires an interface association must still have one. When such
+    // a block loses its association the device class is derived to match, so
+    // the result is self-consistent and wrong -- which is exactly how the
+    // audio-only costume once enumerated and bound no driver, and exactly
+    // what the first version of this validator failed to catch.
+    for (uint8_t i = 0; i < usbif_emit_n; i++) {
+        if (!usbif_emit_blk[i]->iad_required) {
+            continue;
+        }
+        const uint16_t o = usbif_emit_off[i];
+        if (o + 2u > total || usbif_desc_buf[o + 1] != TUSB_DESC_INTERFACE_ASSOCIATION) {
+            return -16;                 // required association missing
+        }
+    }
+    return 0;
 }
 
 uint16_t usbif_fn_get(void) {

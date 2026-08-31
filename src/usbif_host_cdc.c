@@ -254,15 +254,27 @@ void usbif_cdc_close(void) {
 
 // Called by usbif_host.c when a device disappears mid-session.
 void usbif_cdc_on_dev_gone(usb_device_handle_t dev) {
-    if (usbif_cdc.open && usbif_cdc.dev == dev) {
-        usbif_cdc.open = false;
-        // Release the claim so the library can actually free the device --
-        // a close with a claimed interface fails, the stale device wedges
-        // the library, and the returning device never re-enumerates
-        // (observed with the NUCLEO's mode switch). The transfer objects
-        // leak on this path for now: three small allocations, recorded.
-        usb_host_interface_release(usbif_host_client_get(), dev, usbif_cdc.data_itf);
+    if (!usbif_cdc.open || usbif_cdc.dev != dev) {
+        return;
     }
+    // Order matters on this path. Clearing `open` first stops the transfer
+    // callbacks resubmitting; releasing the claim lets the library actually
+    // free the device, without which the stale device wedges it and the
+    // returning device never re-enumerates (observed with the NUCLEO's mode
+    // switch).
+    usbif_cdc.open = false;
+    usb_host_interface_release(usbif_host_client_get(), dev, usbif_cdc.data_itf);
+    // Then free the transfers. The endpoints are gone with the device, so
+    // there is nothing to halt or flush first -- but an in-flight transfer's
+    // callback may still be queued in the client, so give the host task one
+    // pass to drain before freeing what those callbacks would touch.
+    vTaskDelay(pdMS_TO_TICKS(20));
+    usb_host_transfer_free(usbif_cdc.xfer_in);
+    usb_host_transfer_free(usbif_cdc.xfer_out);
+    usb_host_transfer_free(usbif_cdc.xfer_ctrl);
+    usbif_cdc.xfer_in = NULL;
+    usbif_cdc.xfer_out = NULL;
+    usbif_cdc.xfer_ctrl = NULL;
 }
 
 uint32_t usbif_cdc_rx_dropped(void) {
