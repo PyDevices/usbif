@@ -9,7 +9,7 @@ jobs:
     # The event transport is the piece the whole host side rests on, and it
     # is testable without hardware: a failure here should be a two-second
     # answer on a runner rather than a reflash on someone's desk.
-    name: Ring buffer (host build)
+    name: Host-testable C (ring buffer, MIDI packet codec)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,6 +18,12 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -Isrc \
              -o /tmp/test_ringbuf tests/test_ringbuf.c src/shared/usbif_ringbuf.c
           /tmp/test_ringbuf
+      - name: Build and run the USB-MIDI packet codec tests
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+             -o /tmp/test_midi_packets tests/test_midi_packets.c \
+             src/shared/usbif_midi_packet.c
+          /tmp/test_midi_packets
 
   patches:
     # The patch queue is only useful if it still applies. This catches the

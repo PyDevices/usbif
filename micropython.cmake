@@ -24,6 +24,7 @@ target_sources(usermod_usbif INTERFACE
     ${USBIF_SRC_DIR}/usbif_hid_dev.c
     ${USBIF_SRC_DIR}/usbif_msc_dev.c
     ${USBIF_SRC_DIR}/shared/usbif_ringbuf.c
+    ${USBIF_SRC_DIR}/shared/usbif_midi_packet.c
 )
 
 target_include_directories(usermod_usbif INTERFACE

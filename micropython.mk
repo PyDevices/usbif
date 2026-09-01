@@ -13,4 +13,5 @@ SRC_USERMOD_C += \
     $(USBIF_SRC_DIR)/mod_usbif.c \
     $(USBIF_SRC_DIR)/usbif_uac.c \
     $(USBIF_SRC_DIR)/usbif_i2s.c \
-    $(USBIF_SRC_DIR)/shared/usbif_ringbuf.c
+    $(USBIF_SRC_DIR)/shared/usbif_ringbuf.c \
+    $(USBIF_SRC_DIR)/shared/usbif_midi_packet.c

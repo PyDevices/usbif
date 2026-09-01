@@ -42,6 +42,8 @@
 #include "freertos/task.h"
 #include "usb/usb_host.h"
 
+#include "shared/usbif_midi_packet.h"
+
 extern usb_host_client_handle_t usbif_host_client_get(void);
 extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
 
@@ -81,45 +83,21 @@ static void usbif_midih_rx_push(const uint8_t *data, size_t len) {
     }
 }
 
-// How many of a packet's three data bytes are real, by Code Index Number.
-// Zero means "not a message we forward" (CIN 0 and 1 are reserved for
-// vendor and cable events). Table rather than a switch because the mapping
-// is the specification's, not a policy of ours -- USB-MIDI 1.0 table 4-1.
-static const uint8_t usbif_midi_cin_len[16] = {
-    0,  // 0x0 misc / reserved
-    0,  // 0x1 cable event / reserved
-    2,  // 0x2 two-byte system common
-    3,  // 0x3 three-byte system common
-    3,  // 0x4 SysEx starts or continues
-    1,  // 0x5 SysEx ends with one byte, or single-byte system common
-    2,  // 0x6 SysEx ends with two bytes
-    3,  // 0x7 SysEx ends with three bytes
-    3,  // 0x8 note off
-    3,  // 0x9 note on
-    3,  // 0xA poly key pressure
-    3,  // 0xB control change
-    2,  // 0xC program change
-    2,  // 0xD channel pressure
-    3,  // 0xE pitch bend
-    1,  // 0xF single byte (realtime)
-};
-
 static void usbif_midih_in_cb(usb_transfer_t *transfer) {
     if (!usbif_midih.open) {
         return;
     }
     if (transfer->status == USB_TRANSFER_STATUS_COMPLETED && transfer->actual_num_bytes >= 4) {
-        const uint8_t *p = transfer->data_buffer;
-        // A single IN transfer can carry several packets; walk all of them.
-        for (int i = 0; i + 4 <= transfer->actual_num_bytes; i += 4) {
-            uint8_t cin = p[i] & 0x0F;
-            uint8_t n = usbif_midi_cin_len[cin];
-            if (n) {
-                // Unpack to a plain MIDI byte stream: the cable number and
-                // the CIN are transport framing, and Python is given the
-                // same bytes it would see on a DIN cable.
-                usbif_midih_rx_push(&p[i + 1], n);
-            }
+        // Unpack to a plain MIDI byte stream: the cable number and the CIN
+        // are transport framing, and Python is handed the same bytes it
+        // would see on a DIN cable. The codec is in shared/ and tested on
+        // the host (tests/test_midi_packets.c) -- this is the same code
+        // those tests exercise, not a parallel copy of it.
+        uint8_t midi[USBIF_MIDI_MAX_MPS];
+        size_t n = usbif_midi_unpack(transfer->data_buffer,
+            (size_t)transfer->actual_num_bytes, midi, sizeof(midi));
+        if (n) {
+            usbif_midih_rx_push(midi, n);
         }
     }
     if (transfer->status == USB_TRANSFER_STATUS_COMPLETED
@@ -226,17 +204,11 @@ int usbif_host_midi_read(uint8_t *out, size_t max) {
     return (int)n;
 }
 
-// Pack a plain MIDI byte stream into USB-MIDI event packets.
-//
-// Only complete messages are sent: a trailing partial message is left
-// unsent and its byte count is *not* reported as written, so the caller
-// can hand the remainder in again with the rest appended. Sending a
-// half-message would put a synthesiser into a state no later byte can
-// explain, which is a far worse failure than a short write.
-//
-// SysEx is deliberately not handled yet: it needs state carried across
-// calls (a message can span many writes) and no fixture on this bench
-// sends it. It is refused rather than mangled -- see the return below.
+// Pack a plain MIDI byte stream into USB-MIDI event packets and send one
+// transfer. Returns how many input bytes were consumed, which can be fewer
+// than offered -- the codec leaves a partial trailing message for the next
+// call rather than sending half of it. See shared/usbif_midi_packet.h for
+// that rule and the two deliberate refusals behind it.
 int usbif_host_midi_write(const uint8_t *data, size_t len) {
     if (!usbif_midih.open) {
         return -1;
@@ -254,57 +226,17 @@ int usbif_host_midi_write(const uint8_t *data, size_t len) {
         return 0;
     }
 
-    uint8_t *dst = usbif_midih.xfer_out->data_buffer;
-    size_t packets = 0;
     size_t consumed = 0;
-    const size_t max_packets = USBIF_MIDI_MAX_MPS / 4;
+    size_t packed = usbif_midi_pack(data, len,
+        usbif_midih.xfer_out->data_buffer, USBIF_MIDI_MAX_MPS, &consumed);
 
-    while (consumed < len && packets < max_packets) {
-        uint8_t status = data[consumed];
-        if (status < 0x80) {
-            // A data byte where a status byte belongs: running status is
-            // not reconstructed here, and guessing would invent messages.
-            // Skip it rather than emit something the caller did not say.
-            consumed++;
-            continue;
-        }
-        if (status >= 0xF8) {
-            // System realtime: one byte, CIN 0xF, and legal *between* the
-            // bytes of another message, which is why it is handled first.
-            dst[packets * 4 + 0] = 0x0F;
-            dst[packets * 4 + 1] = status;
-            dst[packets * 4 + 2] = 0;
-            dst[packets * 4 + 3] = 0;
-            packets++;
-            consumed++;
-            continue;
-        }
-        if (status == 0xF0) {
-            return (int)consumed;   // SysEx: unsupported, see the note above
-        }
-
-        uint8_t hi = (uint8_t)(status >> 4);
-        // Program change and channel pressure are two bytes; every other
-        // channel message is three.
-        size_t need = (hi == 0x0C || hi == 0x0D) ? 2 : 3;
-        if (consumed + need > len) {
-            break;      // partial message: leave it for the next call
-        }
-        dst[packets * 4 + 0] = hi;      // cable 0, CIN == the status nibble
-        dst[packets * 4 + 1] = status;
-        dst[packets * 4 + 2] = data[consumed + 1];
-        dst[packets * 4 + 3] = (need == 3) ? data[consumed + 2] : 0;
-        packets++;
-        consumed += need;
-    }
-
-    if (packets == 0) {
+    if (packed == 0) {
         return (int)consumed;
     }
 
     usbif_midih.xfer_out->device_handle = usbif_midih.dev;
     usbif_midih.xfer_out->bEndpointAddress = usbif_midih.ep_out;
-    usbif_midih.xfer_out->num_bytes = (int)(packets * 4);
+    usbif_midih.xfer_out->num_bytes = (int)packed;
     usbif_midih.xfer_out->callback = usbif_midih_out_cb;
     usbif_midih.out_busy = true;
     if (usb_host_transfer_submit(usbif_midih.xfer_out) != ESP_OK) {
