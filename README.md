@@ -95,7 +95,9 @@ And the working host side carries honest limits for now: one session per
 class at a time; proven at full speed only (the ESP32-P4's high-speed host
 mode has an open defect, tracked in the findings); MSC now mounts as a filesystem, read-write
 (`examples/usb_drive_mount.py` lists a hosted stick; `usb_drive_log.py`
-appends sensor lines to one and reads them back after a remount); HID delivers raw reports rather than decoded
+appends sensor lines to one and reads them back after a remount), with
+Bulk-Only Reset Recovery and REQUEST SENSE behind it, both exercised by
+a deliberate device-side failure rather than assumed; HID delivers raw reports rather than decoded
 events; and `host_stop()` on a device that was genuinely held open is now
 reliable at realistic hold times (8 of 8 clean in this session's sample)
 after two rounds of fixes -- the teardown now closes each class driver's

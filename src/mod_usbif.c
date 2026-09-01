@@ -79,7 +79,9 @@ extern int usbif_msc_open(uint32_t dev_id);
 extern int usbif_msc_info(uint32_t *num_blocks, uint32_t *block_size, const char **inquiry);
 extern int usbif_msc_read_block(uint32_t lba, uint8_t *out, size_t max);
 extern int usbif_msc_write_block(uint32_t lba, const uint8_t *data, size_t len);
+extern int usbif_msc_provoke_error(void);
 extern uint8_t usbif_msc_last_fail_stage, usbif_msc_last_csw_status, usbif_msc_last_xfer_status;
+extern uint8_t usbif_msc_last_sense_key, usbif_msc_last_asc, usbif_msc_last_ascq;
 extern int usbif_msc_last_moved;
 extern void usbif_msc_close(void);
 #else
@@ -686,18 +688,33 @@ static MP_DEFINE_CONST_FUN_OBJ_2(usbif_host_msc_write_obj, usbif_host_msc_write)
 // that rejected the command -- guessing between those wastes a build.
 static mp_obj_t usbif_host_msc_diag(void) {
     #if USBIF_HAVE_HOST
-    mp_obj_t items[4] = {
+    mp_obj_t items[7] = {
         MP_OBJ_NEW_SMALL_INT(usbif_msc_last_fail_stage),
         MP_OBJ_NEW_SMALL_INT(usbif_msc_last_csw_status),
         MP_OBJ_NEW_SMALL_INT(usbif_msc_last_moved),
         MP_OBJ_NEW_SMALL_INT(usbif_msc_last_xfer_status),
+        MP_OBJ_NEW_SMALL_INT(usbif_msc_last_sense_key),
+        MP_OBJ_NEW_SMALL_INT(usbif_msc_last_asc),
+        MP_OBJ_NEW_SMALL_INT(usbif_msc_last_ascq),
     };
-    return mp_obj_new_tuple(4, items);
+    return mp_obj_new_tuple(7, items);
     #else
     return mp_const_none;
     #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_msc_diag_obj, usbif_host_msc_diag);
+
+// Provoke a device-side command failure on purpose, so the recovery path
+// and REQUEST SENSE can be proven on real hardware instead of assumed.
+// Returns the transaction result (negative); read host_msc_diag() after.
+static mp_obj_t usbif_host_msc_provoke(void) {
+    #if USBIF_HAVE_HOST
+    return MP_OBJ_NEW_SMALL_INT(usbif_msc_provoke_error());
+    #else
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_msc_provoke_obj, usbif_host_msc_provoke);
 
 static mp_obj_t usbif_host_msc_close_py(void) {
     #if USBIF_HAVE_HOST
@@ -1037,6 +1054,7 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_msc_read), MP_ROM_PTR(&usbif_host_msc_read_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_msc_write), MP_ROM_PTR(&usbif_host_msc_write_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_msc_diag), MP_ROM_PTR(&usbif_host_msc_diag_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_msc_provoke), MP_ROM_PTR(&usbif_host_msc_provoke_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_msc_close), MP_ROM_PTR(&usbif_host_msc_close_obj) },
     { MP_ROM_QSTR(MP_QSTR_midi_write), MP_ROM_PTR(&usbif_midi_write_obj) },
     { MP_ROM_QSTR(MP_QSTR_midi_read), MP_ROM_PTR(&usbif_midi_read_obj) },

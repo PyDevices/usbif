@@ -52,7 +52,9 @@ typedef struct {
     uint32_t block_size;
     char inquiry[29];               // "VENDOR12PRODUCT8901234567REV4", NUL-terminated
     usb_transfer_t *xfer;           // one transfer object, reused per stage
+    usb_transfer_t *xfer_ctrl;      // control pipe, for the Bulk-Only reset
     volatile bool done;
+    volatile bool ctrl_done;
 } usbif_msc_t;
 
 static usbif_msc_t usbif_msc;
@@ -66,6 +68,16 @@ uint8_t usbif_msc_last_fail_stage;
 uint8_t usbif_msc_last_csw_status = 0xFF;
 uint8_t usbif_msc_last_xfer_status = 0xFF;
 int usbif_msc_last_moved;
+// REQUEST SENSE result for the last failed command: sense key, additional
+// sense code, and qualifier. Without these a rejected command says only
+// "it failed" -- these say why (write-protected, medium changed, no
+// medium, and so on), which is the difference between a diagnosis and a
+// guess.
+uint8_t usbif_msc_last_sense_key = 0xFF;
+uint8_t usbif_msc_last_asc, usbif_msc_last_ascq;
+// Guard: REQUEST SENSE is itself a BOT transaction, so it must not be
+// issued from inside its own failure path.
+static bool usbif_msc_in_sense;
 
 // Minimal Bulk-Only reset recovery. The spec's full form is a class
 // request (Bulk-Only Mass Storage Reset) followed by CLEAR_FEATURE(HALT)
@@ -74,10 +86,13 @@ int usbif_msc_last_moved;
 // every later command -- including a fresh open -- fails until the device
 // is physically unplugged, which is exactly what happened during write
 // bring-up and cost a replug per attempt.
+static void usbif_msc_bot_reset(void);
+
 static void usbif_msc_recover(void) {
     if (usbif_msc.dev == NULL) {
         return;
     }
+    usbif_msc_bot_reset();
     usb_host_endpoint_clear(usbif_msc.dev, usbif_msc.ep_in);
     usb_host_endpoint_clear(usbif_msc.dev, usbif_msc.ep_out);
 }
@@ -87,6 +102,44 @@ void usbif_msc_close(void);
 static void usbif_msc_cb(usb_transfer_t *transfer) {
     (void)transfer;
     usbif_msc.done = true;
+}
+
+static void usbif_msc_ctrl_cb(usb_transfer_t *transfer) {
+    (void)transfer;
+    usbif_msc.ctrl_done = true;
+}
+
+// Bulk-Only Mass Storage Reset (class request 0xFF): tells the device to
+// abandon the current command and ready itself for a new CBW, without
+// disturbing its configuration or its media. The spec's Reset Recovery is
+// this request *followed by* CLEAR_FEATURE(HALT) on both pipes; doing only
+// the halts leaves a device that has lost CBW/CSW synchronisation still
+// confused, which is the case the halts alone cannot fix.
+static void usbif_msc_bot_reset(void) {
+    if (usbif_msc.xfer_ctrl == NULL || usbif_msc.dev == NULL) {
+        return;
+    }
+    uint8_t *sp = usbif_msc.xfer_ctrl->data_buffer;
+    sp[0] = 0x21;   // host->device, class, interface
+    sp[1] = 0xFF;   // Bulk-Only Mass Storage Reset
+    sp[2] = 0x00;
+    sp[3] = 0x00;
+    sp[4] = usbif_msc.itf;
+    sp[5] = 0x00;
+    sp[6] = 0x00;   // wLength 0
+    sp[7] = 0x00;
+    usbif_msc.xfer_ctrl->device_handle = usbif_msc.dev;
+    usbif_msc.xfer_ctrl->bEndpointAddress = 0;
+    usbif_msc.xfer_ctrl->num_bytes = 8;
+    usbif_msc.xfer_ctrl->callback = usbif_msc_ctrl_cb;
+    usbif_msc.ctrl_done = false;
+    if (usb_host_transfer_submit_control(usbif_host_client_get(),
+        usbif_msc.xfer_ctrl) != ESP_OK) {
+        return;
+    }
+    for (int i = 0; i < 50 && !usbif_msc.ctrl_done; i++) {
+        vTaskDelay(1);
+    }
 }
 
 // Run one transfer stage to completion. Returns actual bytes, or -1.
@@ -114,6 +167,42 @@ static int usbif_msc_stage(uint8_t ep, const void *out_data, size_t len) {
         return -1;
     }
     return usbif_msc.xfer->actual_num_bytes;
+}
+
+static int usbif_msc_xact(const uint8_t *cb, uint8_t cb_len,
+    uint8_t *data_in, const uint8_t *data_out, uint32_t data_len);
+
+// REQUEST SENSE, issued after a device rejects a command, so the failure
+// can say *why*. Saves and restores the diagnostic globals around itself:
+// this is a full BOT transaction and would otherwise overwrite the very
+// failure it was called to explain.
+static void usbif_msc_request_sense(void) {
+    if (usbif_msc_in_sense) {
+        return;
+    }
+    usbif_msc_in_sense = true;
+    const uint8_t saved_stage = usbif_msc_last_fail_stage;
+    const uint8_t saved_csw = usbif_msc_last_csw_status;
+    const uint8_t saved_xfer = usbif_msc_last_xfer_status;
+    const int saved_moved = usbif_msc_last_moved;
+
+    uint8_t sense[18];
+    const uint8_t cb_sense[6] = { 0x03, 0, 0, 0, sizeof(sense), 0 };
+    if (usbif_msc_xact(cb_sense, 6, sense, NULL, sizeof(sense)) >= 18) {
+        usbif_msc_last_sense_key = sense[2] & 0x0F;
+        usbif_msc_last_asc = sense[12];
+        usbif_msc_last_ascq = sense[13];
+    } else {
+        usbif_msc_last_sense_key = 0xFF;
+        usbif_msc_last_asc = 0;
+        usbif_msc_last_ascq = 0;
+    }
+
+    usbif_msc_last_fail_stage = saved_stage;
+    usbif_msc_last_csw_status = saved_csw;
+    usbif_msc_last_xfer_status = saved_xfer;
+    usbif_msc_last_moved = saved_moved;
+    usbif_msc_in_sense = false;
 }
 
 // One full BOT round trip. cb: SCSI command block. Exactly one of data_in
@@ -162,6 +251,7 @@ static int usbif_msc_xact(const uint8_t *cb, uint8_t cb_len,
     if (csw_n < 13) {
         usbif_msc_last_fail_stage = 3;
         usbif_msc_recover();
+        usbif_msc_request_sense();
         return -1;
     }
     const uint8_t *csw = usbif_msc.xfer->data_buffer;
@@ -169,13 +259,35 @@ static int usbif_msc_xact(const uint8_t *cb, uint8_t cb_len,
     memcpy(&csw_tag, &csw[4], 4);
     usbif_msc_last_csw_status = csw[12];
     if (memcmp(csw, "USBS", 4) != 0 || csw_tag != tag) {
+        // A malformed or mis-tagged CSW means the device and host have lost
+        // sync, so Reset Recovery comes first -- and only then is it safe to
+        // ask why, since a device that has just been reset is ready for a
+        // new CBW and still holds the sense data for the command it failed.
+        //
+        // An earlier attempt tried the other order, clearing the bulk-IN
+        // halt and re-reading the CSW before giving up. On this drive that
+        // was strictly worse: it poisoned the session that plain recovery
+        // had been surviving, and even teardown then failed. Reverted, and
+        // recorded rather than quietly dropped -- the spec permits the
+        // retry, this device does not cooperate with it.
         usbif_msc_last_fail_stage = 4;
         usbif_msc_recover();
+        usbif_msc_request_sense();
         return -1;
     }
     if (csw[12] != 0) {
         usbif_msc_last_fail_stage = 5;
-        usbif_msc_recover();
+        // BOT distinguishes the two failure kinds, and so should we: status
+        // 1 means the device rejected the command but is still in sync, so
+        // asking REQUEST SENSE why is both safe and useful. Status 2 is a
+        // phase error, where the device and host disagree about where they
+        // are -- only a full Reset Recovery fixes that, and a sense command
+        // issued into that confusion would just fail too.
+        if (csw[12] == 2) {
+            usbif_msc_recover();
+        } else {
+            usbif_msc_request_sense();
+        }
         return -1;
     }
     return moved;
@@ -229,7 +341,10 @@ int usbif_msc_open(uint32_t dev_id) {
     if (usb_host_interface_claim(usbif_host_client_get(), dev, usbif_msc.itf, 0) != ESP_OK) {
         return -5;
     }
-    if (usb_host_transfer_alloc(USBIF_MSC_BLOCK_MAX + USBIF_MSC_MAX_MPS, 0, &usbif_msc.xfer) != ESP_OK) {
+    if (usb_host_transfer_alloc(USBIF_MSC_BLOCK_MAX + USBIF_MSC_MAX_MPS, 0, &usbif_msc.xfer) != ESP_OK
+        || usb_host_transfer_alloc(16, 0, &usbif_msc.xfer_ctrl) != ESP_OK) {
+        usb_host_transfer_free(usbif_msc.xfer);
+        usb_host_transfer_free(usbif_msc.xfer_ctrl);
         usb_host_interface_release(usbif_host_client_get(), dev, usbif_msc.itf);
         return -6;
     }
@@ -320,6 +435,26 @@ int usbif_msc_write_block(uint32_t lba, const uint8_t *data, size_t len) {
     return n == (int)usbif_msc.block_size ? n : -3;
 }
 
+// Diagnostic: issue a SCSI opcode the device is required to reject, so the
+// failure path can be *proven* rather than assumed. 0xFF is not a defined
+// command; a conforming device answers CHECK CONDITION with sense key
+// ILLEGAL REQUEST (5) and ASC 0x20, "invalid command operation code",
+// without touching the medium.
+//
+// This exists because the obvious test -- reading past the end of the
+// medium -- never reaches the device at all: usbif_msc_read_block()'s own
+// bounds check refuses it first, so it proves nothing about recovery. A
+// failure path that has never been taken is a guess, and this module has
+// already been bitten once by exactly that (see the descriptor validator
+// in the findings).
+int usbif_msc_provoke_error(void) {
+    if (!usbif_msc.open) {
+        return -1;
+    }
+    const uint8_t cb[6] = { 0xFF, 0, 0, 0, 0, 0 };
+    return usbif_msc_xact(cb, 6, NULL, NULL, 0);
+}
+
 void usbif_msc_close(void) {
     if (!usbif_msc.open) {
         return;
@@ -327,6 +462,8 @@ void usbif_msc_close(void) {
     usbif_msc.open = false;
     vTaskDelay(pdMS_TO_TICKS(20));
     usb_host_transfer_free(usbif_msc.xfer);
+    usb_host_transfer_free(usbif_msc.xfer_ctrl);
+    usbif_msc.xfer_ctrl = NULL;
     usb_host_interface_release(usbif_host_client_get(), usbif_msc.dev, usbif_msc.itf);
 }
 
@@ -338,7 +475,9 @@ void usbif_msc_on_dev_gone(usb_device_handle_t dev) {
     usb_host_interface_release(usbif_host_client_get(), dev, usbif_msc.itf);
     vTaskDelay(pdMS_TO_TICKS(20));
     usb_host_transfer_free(usbif_msc.xfer);
+    usb_host_transfer_free(usbif_msc.xfer_ctrl);
     usbif_msc.xfer = NULL;
+    usbif_msc.xfer_ctrl = NULL;
 }
 
 #endif // CONFIG_SOC_USB_OTG_SUPPORTED
