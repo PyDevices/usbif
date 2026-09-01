@@ -67,14 +67,29 @@ Also working, and the foundation the rest builds on:
 
 **Not yet working, said precisely:** UVC in either direction; MIDI as a
 *host* (the board as a MIDI device is the flagship above); audio as a host;
-hubs; a device-side drive backed by anything other than a buffer the
-application supplies (an SD card or flash partition would need block
-callbacks that reach hardware from the USB task, which is a design step, not
-an omission); and macOS
+hubs; and macOS
 desktop support, which sits at the [community-verified
 tier](https://github.com/PyDevices/.github/blob/main/docs/platform-support-tiers.md):
 no Mac is on this project's bench, `auto.py` returns a null backend there
-rather than pretending, and a report from the field is what promotes it. And the working host side carries honest limits for now: one session per
+rather than pretending, and a report from the field is what promotes it.
+
+**Real-storage MSC (`msc_attach_blockdev`), implemented but not yet proven
+against a live host.** A device-side drive can now be backed by any
+MicroPython block-device object -- an SD card, a flash partition -- not just
+a buffer: the read10/write10 callbacks call the object's
+`readblocks`/`writeblocks` directly, safe on this port because TinyUSB's
+device task runs through MicroPython's own scheduler (the same mechanism
+upstream's `machine.USBDevice` runtime already uses to call Python from
+inside a TinyUSB callback), so there is no foreign-thread hazard, only a
+latency cost stated in the code. The block-level driver stack was verified
+standalone -- reading a real 32 GB SD card, valid MBR signature -- but
+Windows has not yet been confirmed showing the drive, blocked by a
+connection fault that testing narrowed to something outside this feature
+entirely (bare CDC on a fresh boot doesn't enumerate either, on the same
+port, right now). See `docs/phase0-findings.md` for the full trail before
+trusting this claim either way.
+
+And the working host side carries honest limits for now: one session per
 class at a time; proven at full speed only (the ESP32-P4's high-speed host
 mode has an open defect, tracked in the findings); MSC reads blocks but is
 not mounted as a filesystem; HID delivers raw reports rather than decoded

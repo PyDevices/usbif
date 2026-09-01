@@ -847,6 +847,41 @@ static mp_obj_t usbif_msc_attach_py(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_msc_attach_obj, 1, 2, usbif_msc_attach_py);
 
+// Real storage instead of a RAM buffer: `obj` is any object implementing
+// MicroPython's standard block-device protocol (readblocks/writeblocks,
+// e.g. mip's `sdcard.SDCard`) -- num_blocks/block_size come from the
+// object's own ioctl(4, 0)/ioctl(5, 0) rather than being asked for, so
+// this matches how a board would already open the same object for local
+// use (os.mount(obj, ...) reads its size the same way).
+static mp_obj_t usbif_msc_attach_blockdev_py(size_t n_args, const mp_obj_t *args) {
+    #if defined(CFG_TUD_MSC) && CFG_TUD_MSC
+    extern int usbif_msc_attach_blockdev(uint32_t num_blocks, uint32_t block_size, bool writable);
+    mp_obj_t dest[4];
+    mp_load_method(args[0], MP_QSTR_ioctl, dest);
+    dest[2] = MP_OBJ_NEW_SMALL_INT(4);   // IOCTL_BLOCK_COUNT
+    dest[3] = MP_OBJ_NEW_SMALL_INT(0);
+    mp_int_t num_blocks = mp_obj_get_int(mp_call_method_n_kw(2, 0, dest));
+    mp_load_method(args[0], MP_QSTR_ioctl, dest);
+    dest[2] = MP_OBJ_NEW_SMALL_INT(5);   // IOCTL_BLOCK_SIZE
+    dest[3] = MP_OBJ_NEW_SMALL_INT(0);
+    mp_int_t block_size = mp_obj_get_int(mp_call_method_n_kw(2, 0, dest));
+    const bool writable = (n_args < 2) || mp_obj_is_true(args[1]);
+    int err = usbif_msc_attach_blockdev((uint32_t)num_blocks, (uint32_t)block_size, writable);
+    if (err == -4) {
+        mp_raise_ValueError(MP_ERROR_TEXT("block device must report a 512-byte block size"));
+    } else if (err != 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("MSC already attached; detach first"));
+    }
+    MP_STATE_VM(usbif_msc_obj) = args[0];
+    return mp_const_none;
+    #else
+    (void)n_args;
+    (void)args;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_msc_attach_blockdev_obj, 1, 2, usbif_msc_attach_blockdev_py);
+
 static mp_obj_t usbif_msc_detach_py(void) {
     #if defined(CFG_TUD_MSC) && CFG_TUD_MSC
     extern void usbif_msc_detach(void);
@@ -893,8 +928,26 @@ static mp_obj_t usbif_msc_buffer(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_msc_buffer_obj, usbif_msc_buffer);
 
+// (calls, errors) for the blockdev path -- whether readblocks/writeblocks
+// is being reached at all, and how many of those calls raised a Python
+// exception (swallowed at the call site; see usbif_msc_dev.c).
+static mp_obj_t usbif_msc_bd_stats_py(void) {
+    #if defined(CFG_TUD_MSC) && CFG_TUD_MSC
+    extern uint32_t usbif_msc_bd_stats(uint32_t *errors);
+    uint32_t errors;
+    uint32_t calls = usbif_msc_bd_stats(&errors);
+    mp_obj_t items[2] = { mp_obj_new_int_from_uint(calls), mp_obj_new_int_from_uint(errors) };
+    return mp_obj_new_tuple(2, items);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_msc_bd_stats_obj, usbif_msc_bd_stats_py);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_msc_attach), MP_ROM_PTR(&usbif_msc_attach_obj) },
+    { MP_ROM_QSTR(MP_QSTR_msc_attach_blockdev), MP_ROM_PTR(&usbif_msc_attach_blockdev_obj) },
+    { MP_ROM_QSTR(MP_QSTR_msc_bd_stats), MP_ROM_PTR(&usbif_msc_bd_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_msc_detach), MP_ROM_PTR(&usbif_msc_detach_obj) },
     { MP_ROM_QSTR(MP_QSTR_msc_status), MP_ROM_PTR(&usbif_msc_status_obj) },
     { MP_ROM_QSTR(MP_QSTR_msc_buffer), MP_ROM_PTR(&usbif_msc_buffer_obj) },
@@ -959,6 +1012,14 @@ MP_REGISTER_ROOT_POINTER(mp_obj_t usbif_msc_obj);
 // medium" instead, which is both true and something hosts handle.
 bool usbif_msc_root_alive(void) {
     return MP_STATE_VM(usbif_msc_obj) != MP_OBJ_NULL;
+}
+
+// Consulted by usbif_msc_dev.c's blockdev path (msc_attach_blockdev) to
+// call readblocks/writeblocks on whatever object is currently attached.
+// Same root, same soft-reset guard as the buffer path -- usbif_msc_live()
+// is checked first in every caller, same as it always was.
+mp_obj_t usbif_msc_get_obj(void) {
+    return MP_STATE_VM(usbif_msc_obj);
 }
 #endif
 
