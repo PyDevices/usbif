@@ -74,7 +74,9 @@ support.) And **MIDI as a host**: `src/usbif_host_midi.c`, ours because
 nobody upstream ships an IDF MIDI host driver -- a real keyboard's
 MIDIStreaming interface and endpoints discovered, notes packed and sent,
 with the USB-MIDI packet codec split into `shared/` and tested on the host.
-Incoming notes are the one part still waiting on someone at the keys.
+Incoming notes are proven too: 989 channel messages read from a keyboard --
+notes with velocity, pitch bend across its full range, several CCs, and
+channel-10 drums -- with zero bytes dropped.
 
 **Not yet working, said precisely:** UVC in either direction; audio as a
 host; and macOS
