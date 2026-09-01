@@ -85,6 +85,7 @@ extern int usbif_host_midi_read(uint8_t *out, size_t max);
 extern int usbif_host_midi_write(const uint8_t *data, size_t len);
 extern void usbif_host_midi_close(void);
 extern uint32_t usbif_host_midi_rx_dropped(void);
+extern uint8_t usbif_host_midi_release_failed;
 extern uint8_t usbif_msc_last_fail_stage, usbif_msc_last_csw_status, usbif_msc_last_xfer_status;
 extern uint8_t usbif_msc_last_sense_key, usbif_msc_last_asc, usbif_msc_last_ascq;
 extern int usbif_msc_last_moved;
@@ -785,11 +786,18 @@ static mp_obj_t usbif_host_midi_close_py(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_midi_close_obj, usbif_host_midi_close_py);
 
+// (dropped_bytes, release_failed). The second is the one that matters when
+// a later host_stop() misbehaves: a stuck interface claim surfaces there,
+// far from its cause.
 static mp_obj_t usbif_host_midi_dropped_py(void) {
     #if USBIF_HAVE_HOST
-    return mp_obj_new_int_from_uint(usbif_host_midi_rx_dropped());
+    mp_obj_t items[2] = {
+        mp_obj_new_int_from_uint(usbif_host_midi_rx_dropped()),
+        MP_OBJ_NEW_SMALL_INT(usbif_host_midi_release_failed),
+    };
+    return mp_obj_new_tuple(2, items);
     #else
-    return MP_OBJ_NEW_SMALL_INT(0);
+    return mp_const_none;
     #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_midi_dropped_obj, usbif_host_midi_dropped_py);

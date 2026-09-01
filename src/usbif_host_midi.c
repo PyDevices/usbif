@@ -250,18 +250,69 @@ uint32_t usbif_host_midi_rx_dropped(void) {
     return usbif_midih.rx_dropped;
 }
 
+// Quiesce both pipes before letting go of the interface.
+//
+// The OUT pipe matters as much as the IN one, which is not obvious and was
+// found on hardware: interface_release() refuses while any endpoint still
+// has an in-flight URB, and a write submitted shortly before closing leaves
+// exactly that. The release then fails silently -- nothing checks it -- the
+// claim survives, and the *next* host_stop() reports
+// ESP_ERR_INVALID_STATE from deregister, uninstall and device_free_all, a
+// long way from the cause. Halting both pipes is the fix; checking the
+// release's return is how it would have been caught sooner.
+static void usbif_midih_quiesce(void) {
+    usb_host_endpoint_halt(usbif_midih.dev, usbif_midih.ep_in);
+    usb_host_endpoint_flush(usbif_midih.dev, usbif_midih.ep_in);
+    usb_host_endpoint_clear(usbif_midih.dev, usbif_midih.ep_in);
+    if (usbif_midih.ep_out) {
+        usb_host_endpoint_halt(usbif_midih.dev, usbif_midih.ep_out);
+        usb_host_endpoint_flush(usbif_midih.dev, usbif_midih.ep_out);
+        usb_host_endpoint_clear(usbif_midih.dev, usbif_midih.ep_out);
+    }
+}
+
+// Non-zero if the interface could not be released -- worth surfacing rather
+// than discarding, since a stuck claim only shows up much later as a
+// teardown failure.
+uint8_t usbif_host_midi_release_failed;
+
+static void usbif_midih_release(void) {
+    usb_host_transfer_free(usbif_midih.xfer_in);
+    usb_host_transfer_free(usbif_midih.xfer_out);
+    usbif_midih.xfer_in = NULL;
+    usbif_midih.xfer_out = NULL;
+
+    // Retry, because the release can legitimately be early rather than
+    // wrong. interface_release() refuses while any endpoint still has an
+    // in-flight URB, and the URBs that halt/flush just cancelled are only
+    // retired when the client event pump next runs -- which is a *different*
+    // task from the one usually calling close(). Releasing immediately
+    // therefore loses a race it did not have to enter.
+    //
+    // Measured on a real instrument: halting both pipes alone still left the
+    // claim stuck (release_failed stayed 1), and the failure only showed up
+    // later as ESP_ERR_INVALID_STATE from a host_stop() far away from here.
+    // Waiting for the pump is the actual fix.
+    esp_err_t err = ESP_FAIL;
+    for (int i = 0; i < 25; i++) {
+        err = usb_host_interface_release(usbif_host_client_get(),
+            usbif_midih.dev, usbif_midih.itf);
+        if (err == ESP_OK) {
+            break;
+        }
+        vTaskDelay(1);      // one 10 ms tick; ~250 ms bound in total
+    }
+    usbif_host_midi_release_failed = (err == ESP_OK) ? 0 : 1;
+}
+
 void usbif_host_midi_close(void) {
     if (!usbif_midih.open) {
         return;
     }
     usbif_midih.open = false;
     vTaskDelay(pdMS_TO_TICKS(20));
-    usb_host_endpoint_halt(usbif_midih.dev, usbif_midih.ep_in);
-    usb_host_endpoint_flush(usbif_midih.dev, usbif_midih.ep_in);
-    usb_host_endpoint_clear(usbif_midih.dev, usbif_midih.ep_in);
-    usb_host_transfer_free(usbif_midih.xfer_in);
-    usb_host_transfer_free(usbif_midih.xfer_out);
-    usb_host_interface_release(usbif_host_client_get(), usbif_midih.dev, usbif_midih.itf);
+    usbif_midih_quiesce();
+    usbif_midih_release();
 }
 
 // Teardown-only variant, for usbif_host.c's host_stop() path. Same reason
@@ -274,21 +325,20 @@ void usbif_host_midi_close_for_host_stop(void) {
     }
     usbif_midih.open = false;
     vTaskDelay(pdMS_TO_TICKS(20));
-    usb_host_endpoint_halt(usbif_midih.dev, usbif_midih.ep_in);
-    usb_host_endpoint_flush(usbif_midih.dev, usbif_midih.ep_in);
-    usb_host_endpoint_clear(usbif_midih.dev, usbif_midih.ep_in);
+    usbif_midih_quiesce();
     for (int i = 0; i < 10; i++) {
         usb_host_client_handle_events(usbif_host_client_get(), pdMS_TO_TICKS(10));
     }
-    usb_host_transfer_free(usbif_midih.xfer_in);
-    usb_host_transfer_free(usbif_midih.xfer_out);
-    usb_host_interface_release(usbif_host_client_get(), usbif_midih.dev, usbif_midih.itf);
+    usbif_midih_release();
 }
 
 void usbif_host_midi_on_dev_gone(usb_device_handle_t dev) {
     if (!usbif_midih.open || usbif_midih.dev != dev) {
         return;
     }
+    // Surprise detach: release the claim first so the library can free the
+    // device, then drain before freeing transfers. No endpoint operations --
+    // the device is physically gone and they would be meaningless.
     usbif_midih.open = false;
     usb_host_interface_release(usbif_host_client_get(), dev, usbif_midih.itf);
     vTaskDelay(pdMS_TO_TICKS(20));
