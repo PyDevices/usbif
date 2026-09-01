@@ -65,13 +65,19 @@ Also working, and the foundation the rest builds on:
   let this module vary what it advertises at runtime, and an esp32 helper that
   lets it borrow the OTG controller for host duty
 
-**Not yet working, said precisely:** UVC in either direction; audio as a host;
-external hubs are now *compiled in* but untested (the IDF's
-`CONFIG_USB_HOST_HUBS_SUPPORTED` defaults off, which is why a drive behind
-a powered hub was invisible in Phase 2; the board patches enable it now);
-MIDI as a host is *written but unproven* (`src/usbif_host_midi.c`,
-compile-verified only -- nobody upstream ships an IDF MIDI host driver, so
-it is ours); and macOS
+**Working now, and new:** external hubs, and more than one device at once --
+two devices behind a powered hub enumerated together, the module's first
+multi-device host session, with the hub itself correctly filtered out for
+matching no requested class. (The Phase 2 observation that a drive behind a
+hub was invisible turned out to be an IDF Kconfig default, not missing
+support.) And **MIDI as a host**: `src/usbif_host_midi.c`, ours because
+nobody upstream ships an IDF MIDI host driver -- a real keyboard's
+MIDIStreaming interface and endpoints discovered, notes packed and sent,
+with the USB-MIDI packet codec split into `shared/` and tested on the host.
+Incoming notes are the one part still waiting on someone at the keys.
+
+**Not yet working, said precisely:** UVC in either direction; audio as a
+host; and macOS
 desktop support, which sits at the [community-verified
 tier](https://github.com/PyDevices/.github/blob/main/docs/platform-support-tiers.md):
 no Mac is on this project's bench, `auto.py` returns a null backend there
