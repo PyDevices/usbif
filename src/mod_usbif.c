@@ -78,6 +78,9 @@ extern void usbif_hid_close(void);
 extern int usbif_msc_open(uint32_t dev_id);
 extern int usbif_msc_info(uint32_t *num_blocks, uint32_t *block_size, const char **inquiry);
 extern int usbif_msc_read_block(uint32_t lba, uint8_t *out, size_t max);
+extern int usbif_msc_write_block(uint32_t lba, const uint8_t *data, size_t len);
+extern uint8_t usbif_msc_last_fail_stage, usbif_msc_last_csw_status, usbif_msc_last_xfer_status;
+extern int usbif_msc_last_moved;
 extern void usbif_msc_close(void);
 #else
 #define USBIF_HAVE_HOST (0)
@@ -656,6 +659,46 @@ static mp_obj_t usbif_host_msc_read(mp_obj_t lba_in, mp_obj_t buf_in) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(usbif_host_msc_read_obj, usbif_host_msc_read);
 
+// One block, host-to-device. The buffer must be exactly one block: a short
+// write is refused rather than padded, since padding would put whatever
+// follows the caller's data into the rest of the sector.
+static mp_obj_t usbif_host_msc_write(mp_obj_t lba_in, mp_obj_t buf_in) {
+    #if USBIF_HAVE_HOST
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_READ);
+    int n = usbif_msc_write_block((uint32_t)mp_obj_get_int(lba_in),
+        (const uint8_t *)buf.buf, buf.len);
+    if (n < 0) {
+        mp_raise_OSError(MP_EIO);
+    }
+    return MP_OBJ_NEW_SMALL_INT(n);
+    #else
+    (void)lba_in;
+    (void)buf_in;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(usbif_host_msc_write_obj, usbif_host_msc_write);
+
+// (fail_stage, csw_status, bytes_moved) for the last BOT transaction.
+// fail_stage: 0 none, 1 CBW, 2 data, 3 CSW read, 4 CSW malformed, 5 CSW
+// reported failure. Distinguishes a transfer that errored from a device
+// that rejected the command -- guessing between those wastes a build.
+static mp_obj_t usbif_host_msc_diag(void) {
+    #if USBIF_HAVE_HOST
+    mp_obj_t items[4] = {
+        MP_OBJ_NEW_SMALL_INT(usbif_msc_last_fail_stage),
+        MP_OBJ_NEW_SMALL_INT(usbif_msc_last_csw_status),
+        MP_OBJ_NEW_SMALL_INT(usbif_msc_last_moved),
+        MP_OBJ_NEW_SMALL_INT(usbif_msc_last_xfer_status),
+    };
+    return mp_obj_new_tuple(4, items);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_msc_diag_obj, usbif_host_msc_diag);
+
 static mp_obj_t usbif_host_msc_close_py(void) {
     #if USBIF_HAVE_HOST
     usbif_msc_close();
@@ -992,6 +1035,8 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_msc_open), MP_ROM_PTR(&usbif_host_msc_open_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_msc_info), MP_ROM_PTR(&usbif_host_msc_info_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_msc_read), MP_ROM_PTR(&usbif_host_msc_read_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_msc_write), MP_ROM_PTR(&usbif_host_msc_write_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_msc_diag), MP_ROM_PTR(&usbif_host_msc_diag_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_msc_close), MP_ROM_PTR(&usbif_host_msc_close_obj) },
     { MP_ROM_QSTR(MP_QSTR_midi_write), MP_ROM_PTR(&usbif_midi_write_obj) },
     { MP_ROM_QSTR(MP_QSTR_midi_read), MP_ROM_PTR(&usbif_midi_read_obj) },
