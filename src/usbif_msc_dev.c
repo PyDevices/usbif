@@ -45,6 +45,7 @@
 #include <string.h>
 
 #include "py/runtime.h"
+#include "py/objarray.h"    // MP_OBJ_ARRAY_TYPECODE_FLAG_RW
 
 #define USBIF_MSC_BLOCK_SIZE (512)
 
@@ -208,7 +209,16 @@ static bool usbif_msc_bd_call(qstr method, uint32_t first_block, uint32_t len) {
         mp_obj_t dest[4];
         mp_load_method(obj, method, dest);
         dest[2] = mp_obj_new_int_from_uint(first_block);
-        dest[3] = mp_obj_new_memoryview('B', len, usbif_msc_bd_scratch);
+        // The RW flag is not optional: mp_obj_new_memoryview() stores the
+        // typecode verbatim, and a memoryview without it refuses every
+        // MP_BUFFER_WRITE request (py/objarray.c). readblocks() writes into
+        // the buffer it is handed, so a read-only view makes every single
+        // call raise -- which is exactly what it did: 13591 calls, 13591
+        // failures, a host retrying forever and a drive that reported its
+        // size correctly (no Python needed for capacity) but could never be
+        // read. Found by counter, not by inspection.
+        dest[3] = mp_obj_new_memoryview('B' | MP_OBJ_ARRAY_TYPECODE_FLAG_RW,
+            len, usbif_msc_bd_scratch);
         mp_call_method_n_kw(2, 0, dest);
         nlr_pop();
         return true;

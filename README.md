@@ -73,21 +73,23 @@ tier](https://github.com/PyDevices/.github/blob/main/docs/platform-support-tiers
 no Mac is on this project's bench, `auto.py` returns a null backend there
 rather than pretending, and a report from the field is what promotes it.
 
-**Real-storage MSC (`msc_attach_blockdev`), implemented but not yet proven
-against a live host.** A device-side drive can now be backed by any
+**Real-storage MSC (`msc_attach_blockdev`), proven on the ESP32-P4.** A device-side drive can now be backed by any
 MicroPython block-device object -- an SD card, a flash partition -- not just
 a buffer: the read10/write10 callbacks call the object's
 `readblocks`/`writeblocks` directly, safe on this port because TinyUSB's
 device task runs through MicroPython's own scheduler (the same mechanism
 upstream's `machine.USBDevice` runtime already uses to call Python from
 inside a TinyUSB callback), so there is no foreign-thread hazard, only a
-latency cost stated in the code. The block-level driver stack was verified
-standalone -- reading a real 32 GB SD card, valid MBR signature -- but
-Windows has not yet been confirmed showing the drive, blocked by a
-connection fault that testing narrowed to something outside this feature
-entirely (bare CDC on a fresh boot doesn't enumerate either, on the same
-port, right now). See `docs/phase0-findings.md` for the full trail before
-trusting this claim either way.
+latency cost stated in the code. A 32 GB card in an ESP32-P4 panel
+enumerated on Windows as `MicroPy Mass Storage`, 32,094,814,208 bytes --
+exactly its 62685184 blocks x 512 -- with the MBR parsed and a partition
+mapped to a drive letter, and **488 block ranges served with zero errors**.
+What is *not* yet exercised is the write path against a host, and the card
+used carries no filesystem Windows can mount, so Explorer shows no files
+on it; both wait on formatting a card, which destroys data and so waits on
+a decision rather than being assumed. See `docs/phase0-findings.md`,
+including the P4's SDMMC pin map (its `machine.SDCard()` needs explicit
+pins) and two rough edges in card initialisation.
 
 And the working host side carries honest limits for now: one session per
 class at a time; proven at full speed only (the ESP32-P4's high-speed host
