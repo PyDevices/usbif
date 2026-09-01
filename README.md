@@ -101,8 +101,13 @@ a decision rather than being assumed. See `docs/phase0-findings.md`,
 including the P4's SDMMC pin map (its `machine.SDCard()` needs explicit
 pins) and two rough edges in card initialisation.
 
-And the working host side carries honest limits for now: one session per
-class at a time; proven at full speed only (the ESP32-P4's high-speed host
+And the working host side carries honest limits for now: concurrent sessions are bounded by a
+*channel budget*, not by class -- the ESP32-S3 has eight host channels
+(`OTG_NUM_HOST_CHAN`), a bulk pair costs two and an interrupt IN costs
+one, and every device including a hub costs one for its control pipe.
+On the bench that means HID pairs with either MSC or MIDI, while MSC and
+MIDI together do not fit; the arithmetic and the measurements are in the
+findings; proven at full speed only (the ESP32-P4's high-speed host
 mode has an open defect, tracked in the findings); MSC now mounts as a filesystem, read-write
 (`examples/usb_drive_mount.py` lists a hosted stick; `usb_drive_log.py`
 appends sensor lines to one and reads them back after a remount), with

@@ -733,7 +733,12 @@ static mp_obj_t usbif_host_midi_open_py(mp_obj_t dev_id_in) {
     #if USBIF_HAVE_HOST
     int rc = usbif_host_midi_open((uint32_t)mp_obj_get_int(dev_id_in));
     if (rc != 0) {
-        mp_raise_OSError(MP_EIO);
+        // Carry the driver's own code: -4 no MIDIStreaming interface, -5 max
+        // packet too large, -6 interface claim refused, -7 transfer alloc
+        // failed, -8 first submit failed. Collapsing all of those into a bare
+        // EIO is what made a concurrency failure unreadable.
+        mp_raise_msg_varg(&mp_type_OSError,
+            MP_ERROR_TEXT("host_midi_open failed (%d)"), rc);
     }
     return mp_const_none;
     #else
