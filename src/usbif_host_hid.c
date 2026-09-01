@@ -174,6 +174,34 @@ int usbif_hid_read(uint8_t *out, size_t max) {
     return (int)len;
 }
 
+// Non-zero if the interface could not be released. Found on the MIDI host
+// driver: a failed release is silent, the claim survives, and the damage
+// appears much later as ESP_ERR_INVALID_STATE out of an innocent
+// host_stop(). HID has never been caught by it -- it has no OUT pipe, so
+// the usual culprit (a write in flight at close) cannot happen here -- but
+// the interrupt-IN pipe is re-armed continuously, so the race is reachable
+// and worth closing rather than waiting for a user to find.
+uint8_t usbif_hid_release_failed;
+
+// Release, retrying while the client event pump retires the URBs that
+// halt/flush just cancelled. That pump runs on a different task from the
+// one usually calling close(), so releasing immediately loses a race it
+// never needed to enter.
+static void usbif_hid_release(void) {
+    usb_host_transfer_free(usbif_hid.xfer_in);
+    usbif_hid.xfer_in = NULL;
+    esp_err_t err = ESP_FAIL;
+    for (int i = 0; i < 25; i++) {
+        err = usb_host_interface_release(usbif_host_client_get(),
+            usbif_hid.dev, usbif_hid.itf);
+        if (err == ESP_OK) {
+            break;
+        }
+        vTaskDelay(1);
+    }
+    usbif_hid_release_failed = (err == ESP_OK) ? 0 : 1;
+}
+
 void usbif_hid_close(void) {
     if (!usbif_hid.open) {
         return;
@@ -183,8 +211,7 @@ void usbif_hid_close(void) {
     usb_host_endpoint_halt(usbif_hid.dev, usbif_hid.ep_in);
     usb_host_endpoint_flush(usbif_hid.dev, usbif_hid.ep_in);
     usb_host_endpoint_clear(usbif_hid.dev, usbif_hid.ep_in);
-    usb_host_transfer_free(usbif_hid.xfer_in);
-    usb_host_interface_release(usbif_host_client_get(), usbif_hid.dev, usbif_hid.itf);
+    usbif_hid_release();
 }
 
 // Teardown-only variant for usbif_host.c's host_stop() path. The halt/flush
@@ -203,26 +230,17 @@ void usbif_hid_close(void) {
 // task loop during a live Python-initiated close.
 void usbif_hid_close_for_host_stop(void) {
     if (!usbif_hid.open) {
-        printf("usbif_hid: close_for_host_stop -- was not open\n");
         return;
     }
     usbif_hid.open = false;
     vTaskDelay(pdMS_TO_TICKS(20));
-    printf("usbif_hid: halt\n");
     usb_host_endpoint_halt(usbif_hid.dev, usbif_hid.ep_in);
-    printf("usbif_hid: flush\n");
     usb_host_endpoint_flush(usbif_hid.dev, usbif_hid.ep_in);
-    printf("usbif_hid: clear\n");
     usb_host_endpoint_clear(usbif_hid.dev, usbif_hid.ep_in);
-    printf("usbif_hid: pump loop\n");
     for (int i = 0; i < 10; i++) {
         usb_host_client_handle_events(usbif_host_client_get(), pdMS_TO_TICKS(10));
     }
-    printf("usbif_hid: pump loop done\n");
-    usb_host_transfer_free(usbif_hid.xfer_in);
-    printf("usbif_hid: transfer_free done\n");
-    usb_host_interface_release(usbif_host_client_get(), usbif_hid.dev, usbif_hid.itf);
-    printf("usbif_hid: interface_release done\n");
+    usbif_hid_release();
 }
 
 void usbif_hid_on_dev_gone(usb_device_handle_t dev) {

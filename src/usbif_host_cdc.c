@@ -237,19 +237,54 @@ int usbif_cdc_read(uint8_t *out, size_t max) {
     return (int)n;
 }
 
+// Both pipes, not just IN: usb_host_interface_release() refuses while any
+// endpoint still has an in-flight URB, and a write shortly before closing
+// leaves exactly that on the OUT pipe. Found on the MIDI host driver, which
+// had the same shape and was caught by a real instrument; CDC has not been
+// observed failing, but the bug is the same one.
+static void usbif_cdc_quiesce(void) {
+    usb_host_endpoint_halt(usbif_cdc.dev, usbif_cdc.ep_in);
+    usb_host_endpoint_flush(usbif_cdc.dev, usbif_cdc.ep_in);
+    usb_host_endpoint_clear(usbif_cdc.dev, usbif_cdc.ep_in);
+    if (usbif_cdc.ep_out) {
+        usb_host_endpoint_halt(usbif_cdc.dev, usbif_cdc.ep_out);
+        usb_host_endpoint_flush(usbif_cdc.dev, usbif_cdc.ep_out);
+        usb_host_endpoint_clear(usbif_cdc.dev, usbif_cdc.ep_out);
+    }
+}
+
+uint8_t usbif_cdc_release_failed;
+
+// Retry while the client event pump retires those cancellations: it runs on
+// a different task from the one usually calling close(), so an immediate
+// release loses a race it never needed to enter.
+static void usbif_cdc_release(void) {
+    usb_host_transfer_free(usbif_cdc.xfer_in);
+    usb_host_transfer_free(usbif_cdc.xfer_out);
+    usb_host_transfer_free(usbif_cdc.xfer_ctrl);
+    usbif_cdc.xfer_in = NULL;
+    usbif_cdc.xfer_out = NULL;
+    usbif_cdc.xfer_ctrl = NULL;
+    esp_err_t err = ESP_FAIL;
+    for (int i = 0; i < 25; i++) {
+        err = usb_host_interface_release(usbif_host_client_get(),
+            usbif_cdc.dev, usbif_cdc.data_itf);
+        if (err == ESP_OK) {
+            break;
+        }
+        vTaskDelay(1);
+    }
+    usbif_cdc_release_failed = (err == ESP_OK) ? 0 : 1;
+}
+
 void usbif_cdc_close(void) {
     if (!usbif_cdc.open) {
         return;
     }
     usbif_cdc.open = false;             // callbacks stop resubmitting
     vTaskDelay(pdMS_TO_TICKS(20));      // let in-flight callbacks drain
-    usb_host_endpoint_halt(usbif_cdc.dev, usbif_cdc.ep_in);
-    usb_host_endpoint_flush(usbif_cdc.dev, usbif_cdc.ep_in);
-    usb_host_endpoint_clear(usbif_cdc.dev, usbif_cdc.ep_in);
-    usb_host_transfer_free(usbif_cdc.xfer_in);
-    usb_host_transfer_free(usbif_cdc.xfer_out);
-    usb_host_transfer_free(usbif_cdc.xfer_ctrl);
-    usb_host_interface_release(usbif_host_client_get(), usbif_cdc.dev, usbif_cdc.data_itf);
+    usbif_cdc_quiesce();
+    usbif_cdc_release();
 }
 
 // Teardown-only variant -- see usbif_hid_close_for_host_stop()'s comment in
@@ -262,16 +297,11 @@ void usbif_cdc_close_for_host_stop(void) {
     }
     usbif_cdc.open = false;
     vTaskDelay(pdMS_TO_TICKS(20));
-    usb_host_endpoint_halt(usbif_cdc.dev, usbif_cdc.ep_in);
-    usb_host_endpoint_flush(usbif_cdc.dev, usbif_cdc.ep_in);
-    usb_host_endpoint_clear(usbif_cdc.dev, usbif_cdc.ep_in);
+    usbif_cdc_quiesce();
     for (int i = 0; i < 10; i++) {
         usb_host_client_handle_events(usbif_host_client_get(), pdMS_TO_TICKS(10));
     }
-    usb_host_transfer_free(usbif_cdc.xfer_in);
-    usb_host_transfer_free(usbif_cdc.xfer_out);
-    usb_host_transfer_free(usbif_cdc.xfer_ctrl);
-    usb_host_interface_release(usbif_host_client_get(), usbif_cdc.dev, usbif_cdc.data_itf);
+    usbif_cdc_release();
 }
 
 // Called by usbif_host.c when a device disappears mid-session.
