@@ -147,8 +147,14 @@ def main():
     total_bytes = 0
 
     try:
-        _usbif.dev_functions(_usbif.FN_MIDI)
-        print("costume: midi only -- look for the board as a MIDI device on the host")
+        # Only re-enumerate if we are not already wearing it: changing the
+        # function mask drops the host's connection and costs a fresh
+        # enumeration, which is pure disruption when it is already correct.
+        if restore != _usbif.FN_MIDI:
+            _usbif.dev_functions(_usbif.FN_MIDI)
+            print("costume: midi only -- look for the board as a MIDI device on the host")
+        else:
+            print("costume: already midi only, left alone")
         if not wait_for_mount():
             return False
         print("mounted. play into it for {} s ...".format(DURATION_MS // 1000))
@@ -180,7 +186,8 @@ def main():
                     bend_lo = min(bend_lo, value)
                     bend_hi = max(bend_hi, value)
     finally:
-        _usbif.dev_functions(restore)
+        if _usbif.dev_functions() != restore:
+            _usbif.dev_functions(restore)
 
     print()
     print("--- device MIDI IN ---")
