@@ -66,7 +66,10 @@ Also working, and the foundation the rest builds on:
   lets it borrow the OTG controller for host duty
 
 **Not yet working, said precisely:** UVC in either direction; audio as a host;
-hubs; MIDI as a host is *written but unproven* (`src/usbif_host_midi.c`,
+external hubs are now *compiled in* but untested (the IDF's
+`CONFIG_USB_HOST_HUBS_SUPPORTED` defaults off, which is why a drive behind
+a powered hub was invisible in Phase 2; the board patches enable it now);
+MIDI as a host is *written but unproven* (`src/usbif_host_midi.c`,
 compile-verified only -- nobody upstream ships an IDF MIDI host driver, so
 it is ours); and macOS
 desktop support, which sits at the [community-verified
