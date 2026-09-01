@@ -994,10 +994,15 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_msc_buffer_obj, usbif_msc_buffer);
 static mp_obj_t usbif_msc_bd_stats_py(void) {
     #if defined(CFG_TUD_MSC) && CFG_TUD_MSC
     extern uint32_t usbif_msc_bd_stats(uint32_t *errors);
+    extern uint8_t usbif_msc_last_rejected_scsi;
     uint32_t errors;
     uint32_t calls = usbif_msc_bd_stats(&errors);
-    mp_obj_t items[2] = { mp_obj_new_int_from_uint(calls), mp_obj_new_int_from_uint(errors) };
-    return mp_obj_new_tuple(2, items);
+    mp_obj_t items[3] = {
+        mp_obj_new_int_from_uint(calls),
+        mp_obj_new_int_from_uint(errors),
+        mp_obj_new_int_from_uint(usbif_msc_last_rejected_scsi),
+    };
+    return mp_obj_new_tuple(3, items);
     #else
     return mp_const_none;
     #endif

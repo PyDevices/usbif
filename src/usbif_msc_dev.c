@@ -321,6 +321,16 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *
 // SCSI commands beyond the ones TinyUSB handles itself. Refusing politely
 // beats refusing silently: a host that asks for something unsupported gets
 // an illegal-request sense and moves on.
+// The last SCSI opcode this callback refused. A host that walks away from
+// a drive rarely says why, and "some command was rejected" is not a
+// diagnosis -- this makes the next unhandled command name itself instead
+// of costing a build cycle to guess. (Found the hard way: a Windows format
+// failed with every block operation succeeding, because it wanted a
+// command TinyUSB does not implement and this callback refused.)
+uint8_t usbif_msc_last_rejected_scsi;
+
+#define USBIF_SCSI_CMD_SYNCHRONIZE_CACHE_10 (0x35)
+
 int32_t tud_msc_scsi_cb(uint8_t lun, const uint8_t scsi_cmd[16], void *buffer,
     uint16_t bufsize) {
     (void)buffer;
@@ -328,7 +338,22 @@ int32_t tud_msc_scsi_cb(uint8_t lun, const uint8_t scsi_cmd[16], void *buffer,
     switch (scsi_cmd[0]) {
         case SCSI_CMD_PREVENT_ALLOW_MEDIUM_REMOVAL:
             return 0;                   // nothing to lock; success is honest
+
+        case USBIF_SCSI_CMD_SYNCHRONIZE_CACHE_10:
+            // TinyUSB does not implement this one -- it is not even in its
+            // command enum -- so it lands here. Windows issues it to flush
+            // the device's write cache, and notably at the end of a format;
+            // refusing it fails the whole operation even when every single
+            // block write succeeded, which is exactly what happened.
+            //
+            // Success is the honest answer rather than a convenient one:
+            // writes go straight through to the backing store on their way
+            // in, so there is no cache holding anything back. There is
+            // genuinely nothing to flush.
+            return 0;
+
         default:
+            usbif_msc_last_rejected_scsi = scsi_cmd[0];
             tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, 0x20, 0x00);
             return -1;
     }
