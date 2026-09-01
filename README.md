@@ -65,9 +65,10 @@ Also working, and the foundation the rest builds on:
   let this module vary what it advertises at runtime, and an esp32 helper that
   lets it borrow the OTG controller for host duty
 
-**Not yet working, said precisely:** UVC in either direction; MIDI as a
-*host* (the board as a MIDI device is the flagship above); audio as a host;
-hubs; and macOS
+**Not yet working, said precisely:** UVC in either direction; audio as a host;
+hubs; MIDI as a host is *written but unproven* (`src/usbif_host_midi.c`,
+compile-verified only -- nobody upstream ships an IDF MIDI host driver, so
+it is ours); and macOS
 desktop support, which sits at the [community-verified
 tier](https://github.com/PyDevices/.github/blob/main/docs/platform-support-tiers.md):
 no Mac is on this project's bench, `auto.py` returns a null backend there

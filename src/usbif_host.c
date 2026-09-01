@@ -210,16 +210,19 @@ static void usbif_host_on_new_dev(uint8_t addr) {
 extern void usbif_cdc_on_dev_gone(usb_device_handle_t dev);
 extern void usbif_hid_on_dev_gone(usb_device_handle_t dev);
 extern void usbif_msc_on_dev_gone(usb_device_handle_t dev);
+extern void usbif_host_midi_on_dev_gone(usb_device_handle_t dev);
 extern void usbif_cdc_close(void);
 extern void usbif_hid_close(void);
 extern void usbif_msc_close(void);
 extern void usbif_cdc_close_for_host_stop(void);
 extern void usbif_hid_close_for_host_stop(void);
+extern void usbif_host_midi_close_for_host_stop(void);
 
 static void usbif_host_on_dev_gone(usb_device_handle_t hdl) {
     usbif_cdc_on_dev_gone(hdl);
     usbif_hid_on_dev_gone(hdl);
     usbif_msc_on_dev_gone(hdl);
+    usbif_host_midi_on_dev_gone(hdl);
     for (int i = 0; i < USBIF_HOST_MAX_DEVS; i++) {
         usbif_host_slot_t *slot = &usbif_host_devs[i];
         if (slot->in_use && slot->hdl == hdl) {
@@ -377,6 +380,8 @@ static void usbif_host_task(void *arg) {
             usbif_cdc_close_for_host_stop();
             printf("usbif_host: closing hid\n");
             usbif_hid_close_for_host_stop();
+            printf("usbif_host: closing midi\n");
+            usbif_host_midi_close_for_host_stop();
             printf("usbif_host: closing msc\n");
             usbif_msc_close();
             printf("usbif_host: device_close\n");
