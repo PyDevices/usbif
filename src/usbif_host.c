@@ -80,6 +80,9 @@ static usbif_host_slot_t usbif_host_devs[USBIF_HOST_MAX_DEVS];
 static usb_host_client_handle_t usbif_host_client;
 static TaskHandle_t usbif_host_task_handle;
 static volatile bool usbif_host_task_running;
+// Set once teardown begins, so no device is opened after the close loop has
+// already passed over it. See usbif_host_on_new_dev() for why this exists.
+static volatile bool usbif_host_tearing_down;
 // Set when usbif_host_stop_c()'s wait for the task to exit times out.
 // Once set, the task handle is known-zombie: it is stuck inside a blocking
 // IDF call (observed: usb_host_lib_handle_events() during the ALL_FREE
@@ -147,6 +150,31 @@ static uint16_t usbif_class_bits(const usb_config_desc_t *cfg) {
 }
 
 static void usbif_host_on_new_dev(uint8_t addr) {
+    if (usbif_host_tearing_down) {
+        // Teardown has started. Do NOT open this device.
+        //
+        // This is the host_stop() race, found 2026-09-02. Teardown closes
+        // every tracked device, then drains client events to retire the
+        // asynchronous completions those closes produce. But that same pump
+        // also delivers queued USB_HOST_CLIENT_EVENT_NEW_DEV messages, and
+        // handling one here opens a device *after* the close loop has already
+        // passed over it. Nothing closes it afterwards, so
+        // usb_host_client_deregister() -- which requires the client to have
+        // closed every device it opened -- refuses with ESP_ERR_INVALID_STATE,
+        // ALL_FREE never arrives, uninstall fails, and the next host_start()
+        // is poisoned.
+        //
+        // Measured either side of this gate: teardown fired while a second
+        // device was still enumerating gave deregister 0x103, an ALL_FREE
+        // timeout and 1584 ms; the same teardown after the bus had settled
+        // gave deregister 0x0, ALL_FREE in 10 ms and 556 ms.
+        //
+        // Declining to open is already an understood outcome here -- the
+        // full-slot-table path below returns the same way, and the device
+        // simply stays unclaimed. It will be enumerated again by whoever
+        // starts the host next.
+        return;
+    }
     usbif_host_slot_t *slot = NULL;
     for (int i = 0; i < USBIF_HOST_MAX_DEVS; i++) {
         if (!usbif_host_devs[i].in_use) {
@@ -328,7 +356,8 @@ static void usbif_host_task(void *arg) {
     // Teardown, in the order the library requires: close what we opened,
     // walk away as a client, free the devices, and drain events until the
     // library confirms everything is gone.
-    printf("usbif_host: teardown starting\n");
+    usbif_host_tearing_down = true;
+    printf("usbif_host: teardown starting (new devices now declined)\n");
     for (int i = 0; i < USBIF_HOST_MAX_DEVS; i++) {
         if (usbif_host_devs[i].in_use) {
             // A class driver that is genuinely open (e.g. HID's interrupt-IN
@@ -504,6 +533,7 @@ int usbif_host_start_c(void) {
     #endif
 
     usbif_host_install_result = USBIF_HOST_INSTALL_PENDING;
+    usbif_host_tearing_down = false;
     usbif_host_task_running = true;
     if (xTaskCreatePinnedToCore(usbif_host_task, "usbif_host",
         USBIF_HOST_TASK_STACK, NULL, USBIF_HOST_TASK_PRIO,
