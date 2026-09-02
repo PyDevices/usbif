@@ -467,6 +467,45 @@ void usbif_msc_close(void) {
     usb_host_interface_release(usbif_host_client_get(), usbif_msc.dev, usbif_msc.itf);
 }
 
+// Teardown variant, for use from host_stop() only.
+//
+// The plain close() above was long assumed not to need one: MSC transfers are
+// request/response rather than continuously re-armed, so the reasoning went
+// that no URB is ever in flight at rest for interface_release() to wait on.
+// Measured 2026-09-02, that reasoning is wrong. With an MSC session left open,
+// host_stop() took 1466 ms instead of ~450 ms -- the ALL_FREE wait timing out
+// -- usb_host_uninstall() then failed, and the NEXT host_start() returned
+// ESP_ERR_INVALID_STATE (0x103). Leaving a MIDI session open across the same
+// teardown was clean 3/3 at ~549 ms, and MIDI's only relevant difference is
+// that it has one of these variants. The class with the variant survives; the
+// class without it poisons the library.
+//
+// interface_release() refuses until every endpoint's in-flight URB count is
+// back to zero, and those completions retire only when something pumps
+// usb_host_client_handle_events(). Live, the host task's own loop does that
+// concurrently; during host_stop() that loop has already exited, so this must
+// pump explicitly in the gap. Safe here specifically because nothing else is
+// servicing this client at this point.
+void usbif_msc_close_for_host_stop(void) {
+    if (!usbif_msc.open) {
+        return;
+    }
+    usbif_msc.open = false;
+    vTaskDelay(pdMS_TO_TICKS(20));
+    // Retire anything still in flight before touching its transfers.
+    for (int i = 0; i < 10; i++) {
+        usb_host_client_handle_events(usbif_host_client_get(), pdMS_TO_TICKS(10));
+    }
+    usb_host_transfer_free(usbif_msc.xfer);
+    usb_host_transfer_free(usbif_msc.xfer_ctrl);
+    // Null both, unlike the plain close() which leaves .xfer dangling. The
+    // early-return on .open guards re-entry today, but a dangling pointer that
+    // is only safe by a guard elsewhere is a trap for the next reader.
+    usbif_msc.xfer = NULL;
+    usbif_msc.xfer_ctrl = NULL;
+    usb_host_interface_release(usbif_host_client_get(), usbif_msc.dev, usbif_msc.itf);
+}
+
 void usbif_msc_on_dev_gone(usb_device_handle_t dev) {
     if (!usbif_msc.open || usbif_msc.dev != dev) {
         return;

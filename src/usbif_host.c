@@ -217,6 +217,7 @@ extern void usbif_msc_close(void);
 extern void usbif_cdc_close_for_host_stop(void);
 extern void usbif_hid_close_for_host_stop(void);
 extern void usbif_host_midi_close_for_host_stop(void);
+extern void usbif_msc_close_for_host_stop(void);
 
 static void usbif_host_on_dev_gone(usb_device_handle_t hdl) {
     usbif_cdc_on_dev_gone(hdl);
@@ -366,10 +367,16 @@ static void usbif_host_task(void *arg) {
             // between halt/flush and interface_release inside the plain
             // close(). The _for_host_stop() variants pump explicitly in
             // that exact gap -- safe here specifically because nothing else
-            // is servicing this client concurrently at this point. MSC's
-            // plain close() needs no variant: its transfers are
-            // request/response, not continuously re-armed, so there is no
-            // in-flight URB at rest for interface_release() to wait on.
+            // is servicing this client concurrently at this point. MSC was long
+            // excluded on the grounds that its transfers are
+            // request/response rather than continuously re-armed, so no URB
+            // would be in flight at rest for interface_release() to wait on.
+            // Measured 2026-09-02, that was wrong: an MSC session left open
+            // made this teardown take 1466 ms instead of ~450 ms (the
+            // ALL_FREE wait timing out), uninstall then failed, and the next
+            // host_start() returned ESP_ERR_INVALID_STATE. A MIDI session
+            // left open across the identical path was clean 3/3, and MIDI's
+            // only relevant difference was having a variant. MSC has one now.
             // Diagnostic bracketing (phase0-findings.md): an intermittent
             // hang still shows up roughly 1-in-4 with no printf between
             // "teardown starting" and "pre-deregister drain done" at all,
@@ -383,7 +390,7 @@ static void usbif_host_task(void *arg) {
             printf("usbif_host: closing midi\n");
             usbif_host_midi_close_for_host_stop();
             printf("usbif_host: closing msc\n");
-            usbif_msc_close();
+            usbif_msc_close_for_host_stop();
             printf("usbif_host: device_close\n");
             usb_host_device_close(usbif_host_client, usbif_host_devs[i].hdl);
             printf("usbif_host: device_close returned\n");
@@ -442,6 +449,18 @@ static void usbif_host_task(void *arg) {
         all_free_seen ? "seen" : "NOT seen -- timed out", free_wait_ticks, free_wait_ticks * 10);
     esp_err_t uninstall_err = usb_host_uninstall();
     printf("usbif_host: uninstall -> 0x%x\n", (unsigned)uninstall_err);
+    // A failed uninstall leaves the library installed, so the next
+    // usb_host_install() returns ESP_ERR_INVALID_STATE and host_start() fails
+    // for a reason that looks nothing like its cause. Printing this and
+    // discarding it is what let a broken teardown be reported to Python as a
+    // clean stop, and is why this read for weeks as "a narrow race inside
+    // esp-idf" rather than as our own unpumped close. Mark the task wedged so
+    // host_start() refuses honestly instead of failing mysteriously later.
+    if (uninstall_err != ESP_OK) {
+        usbif_host_task_wedged = true;
+        printf("usbif_host: uninstall FAILED -- marking wedged; a reboot is "
+               "required and host_start() will now say so\n");
+    }
     usbif_host_task_handle = NULL;
     printf("usbif_host: task exiting, handle cleared, core %d\n", esp_cpu_get_core_id());
     vTaskDelete(NULL);
