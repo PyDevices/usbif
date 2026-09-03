@@ -140,8 +140,9 @@ resolved: the stock `ESP32_GENERIC_S3` board build did not enable
 `MICROPY_HW_USB_MSC`, so a first pass of testing found the S3 could only
 reach fifteen of the thirty-one costumes (missing MSC) -- a
 board-configuration gap, not a module limitation, exactly like the same
-distinction already drawn for the P4. The `cmods` board patch for the S3
-now enables it too (matching the P4's own patch), and
+distinction already drawn for the P4. The S3 board-header patch in the build
+workspace's `patches/usbif-NN-*` series now enables it too (matching the P4's
+own patch), and
 `examples/costume_selftest.py` confirms **31 of 31** on the S3 as well.
 All are recorded in [`docs/phase0-findings.md`](docs/phase0-findings.md).
 The plan and the evidence behind every decision are in [`docs/`](docs/).

@@ -2,7 +2,7 @@
 # For CMake-based ports (esp32, rp2, …), see micropython.cmake in this dir.
 #
 # Discovered via USER_C_MODULES pointing at the workspace directory that
-# contains this repo (its parent) — see cmods/build_mp.sh.
+# contains this repo (its parent) — see the workspace's build_mp.sh.
 
 USBIF_MOD_DIR := $(USERMOD_DIR)
 USBIF_SRC_DIR := $(USBIF_MOD_DIR)/src
