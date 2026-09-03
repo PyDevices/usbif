@@ -80,6 +80,7 @@ extern int usbif_msc_info(uint32_t *num_blocks, uint32_t *block_size, const char
 extern int usbif_msc_read_block(uint32_t lba, uint8_t *out, size_t max);
 extern int usbif_msc_write_block(uint32_t lba, const uint8_t *data, size_t len);
 extern int usbif_msc_provoke_error(void);
+extern int usbif_host_desc_get(uint32_t dev_id, const uint8_t **out, uint16_t *len);
 extern int usbif_host_midi_open(uint32_t dev_id);
 extern int usbif_host_midi_read(uint8_t *out, size_t max);
 extern int usbif_host_midi_write(const uint8_t *data, size_t len);
@@ -729,6 +730,29 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_msc_provoke_obj, usbif_host_msc_prov
 // logs does not care which end of the cable it is on. The USB-MIDI packet
 // framing lives in usbif_host_midi.c and never reaches Python.
 
+// The raw active configuration descriptor of a hosted device.
+//
+// Everything a class needs to describe itself is in here -- interfaces, alt
+// settings, endpoints, and the class-specific descriptors that carry audio
+// formats and video frame tables. Returned whole so the parsing happens in
+// Python, where a wrong guess costs a re-run rather than a reflash.
+static mp_obj_t usbif_host_desc_py(mp_obj_t dev_id_in) {
+    #if USBIF_HAVE_HOST
+    const uint8_t *desc = NULL;
+    uint16_t len = 0;
+    int rc = usbif_host_desc_get((uint32_t)mp_obj_get_int(dev_id_in), &desc, &len);
+    if (rc != 0) {
+        mp_raise_msg_varg(&mp_type_OSError,
+            MP_ERROR_TEXT("host_desc failed (%d): -1 no such device, -2 no active config"), rc);
+    }
+    return mp_obj_new_bytes(desc, len);
+    #else
+    (void)dev_id_in;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(usbif_host_desc_obj, usbif_host_desc_py);
+
 static mp_obj_t usbif_host_midi_open_py(mp_obj_t dev_id_in) {
     #if USBIF_HAVE_HOST
     int rc = usbif_host_midi_open((uint32_t)mp_obj_get_int(dev_id_in));
@@ -1134,6 +1158,7 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_start), MP_ROM_PTR(&usbif_host_start_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_stop), MP_ROM_PTR(&usbif_host_stop_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_devices), MP_ROM_PTR(&usbif_host_devices_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_desc), MP_ROM_PTR(&usbif_host_desc_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_drain), MP_ROM_PTR(&usbif_host_drain_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_stats), MP_ROM_PTR(&usbif_host_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_port_cycle), MP_ROM_PTR(&usbif_host_port_cycle_obj) },

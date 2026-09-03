@@ -495,6 +495,36 @@ static void usbif_host_task(void *arg) {
     vTaskDelete(NULL);
 }
 
+// The active configuration descriptor of a hosted device, as raw bytes.
+//
+// Handed to Python whole, including every class-specific descriptor, because
+// that is where format parsing belongs. UAC and UVC describe their formats in
+// class-specific descriptors whose shape varies by device, and iterating a
+// parser for those in C -- reflash, reboot, retry -- against iterating one in
+// Python is not a close contest. It also matches this module's own division:
+// Python configures and observes, C moves the isochronous bytes.
+//
+// The pointer is into the host library's own cached descriptor, valid while
+// the device stays attached; the caller copies it immediately.
+int usbif_host_desc_get(uint32_t dev_id, const uint8_t **out, uint16_t *len) {
+    #if USBIF_HAVE_HOST
+    usb_device_handle_t dev;
+    if (usbif_host_dev_lookup(dev_id, &dev) != 0) {
+        return -1;
+    }
+    const usb_config_desc_t *cfg;
+    if (usb_host_get_active_config_descriptor(dev, &cfg) != ESP_OK) {
+        return -2;
+    }
+    *out = (const uint8_t *)cfg;
+    *len = cfg->wTotalLength;
+    return 0;
+    #else
+    (void)dev_id; (void)out; (void)len;
+    return -1;
+    #endif
+}
+
 int usbif_host_start_c(void) {
     if (usbif_host_task_wedged) {
         // A previous host_stop() never actually finished -- the old task is
