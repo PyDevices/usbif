@@ -73,7 +73,7 @@ typedef struct {
     // Diagnostics, same philosophy as the device-side UAC counters: when a
     // stream sounds wrong the first question is always whether bytes are
     // being lost, and where.
-    volatile uint32_t packets, bytes, dropped, starved, errors;
+    volatile uint32_t packets, bytes, dropped, starved, errors, empty;
 } usbif_uac_host_t;
 
 static usbif_uac_host_t usbif_uach;
@@ -145,7 +145,17 @@ static void usbif_uac_prepare(usb_transfer_t *xfer) {
     xfer->num_bytes = total ? total : usbif_uach.mps;
 }
 
+static volatile uint32_t usbif_uac_cb_count;
+
 static void usbif_uac_cb(usb_transfer_t *xfer) {
+    if (usbif_uac_cb_count < 4) {
+        printf("usbif_uac: cb#%u status=%d actual=%d pkts=%d pkt0=%d/%d\n",
+            (unsigned)usbif_uac_cb_count, (int)xfer->status,
+            (int)xfer->actual_num_bytes, (int)xfer->num_isoc_packets,
+            (int)xfer->isoc_packet_desc[0].status,
+            (int)xfer->isoc_packet_desc[0].actual_num_bytes);
+    }
+    usbif_uac_cb_count++;
     if (!usbif_uach.open) {
         usbif_uach.inflight--;
         return;
@@ -160,6 +170,12 @@ static void usbif_uac_cb(usb_transfer_t *xfer) {
                 usbif_uach.packets++;
             } else if (pkt->status != USB_TRANSFER_STATUS_COMPLETED) {
                 usbif_uach.errors++;
+            } else {
+                // Completed carrying nothing. Counted separately because it
+                // is neither success nor error, and leaving it uncounted made
+                // every statistic read zero while the device streamed
+                // silence -- indistinguishable from never having started.
+                usbif_uach.empty++;
             }
             // Packets are laid out at their *requested* size, not their
             // actual one -- the next packet's data starts where this one's
@@ -185,37 +201,81 @@ static void usbif_uac_cb(usb_transfer_t *xfer) {
     }
 }
 
+static volatile bool usbif_uac_ctrl_done;
+
+// IDF rejects any URB whose callback is NULL -- urb_check_args() in usbh.c
+// fails it before the transfer is ever attempted, returning ESP_ERR_INVALID_ARG
+// with no hint that the callback is what it objected to. A control transfer
+// this code intends to wait for still needs one, so this exists to set a flag.
+static void usbif_uac_ctrl_cb(usb_transfer_t *xfer) {
+    (void)xfer;
+    usbif_uac_ctrl_done = true;
+}
+
+// One control transfer, synchronous: submit, pump until the callback fires,
+// free. Setup-only when payload is NULL.
+static int usbif_uac_control(uint8_t req_type, uint8_t request, uint16_t value,
+    uint16_t index, const uint8_t *payload, uint16_t len) {
+    usb_transfer_t *ctrl;
+    if (usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + len, 0, &ctrl) != ESP_OK) {
+        return -1;
+    }
+    usb_setup_packet_t *setup = (usb_setup_packet_t *)ctrl->data_buffer;
+    setup->bmRequestType = req_type;
+    setup->bRequest = request;
+    setup->wValue = value;
+    setup->wIndex = index;
+    setup->wLength = len;
+    if (payload && len) {
+        memcpy(ctrl->data_buffer + sizeof(usb_setup_packet_t), payload, len);
+    }
+    ctrl->device_handle = usbif_uach.dev;
+    ctrl->bEndpointAddress = 0;
+    ctrl->num_bytes = sizeof(usb_setup_packet_t) + len;
+    ctrl->callback = usbif_uac_ctrl_cb;
+    ctrl->timeout_ms = 500;
+    usbif_uac_ctrl_done = false;
+    esp_err_t err = usb_host_transfer_submit_control(usbif_host_client_get(), ctrl);
+    // Wait for the completion rather than pumping a fixed number of times:
+    // the transfer is only safe to free once its callback has run, and a
+    // fixed count is either too short (freeing under a live URB) or wasted
+    // time. Bounded so a device that never answers cannot hang setup.
+    for (int i = 0; i < 100 && !usbif_uac_ctrl_done; i++) {
+        usb_host_client_handle_events(usbif_host_client_get(), pdMS_TO_TICKS(5));
+    }
+    printf("usbif_uac: ctrl req=0x%02x val=0x%04x idx=0x%04x len=%u submit=0x%x status=%d actual=%d\n",
+        (unsigned)request, (unsigned)value, (unsigned)index, (unsigned)len,
+        (unsigned)err, (int)ctrl->status, (int)ctrl->actual_num_bytes);
+    usb_host_transfer_free(ctrl);
+    return err == ESP_OK ? 0 : -2;
+}
+
+// Tell the DEVICE to switch to the streaming alternate setting.
+//
+// This is not optional and is not what usb_host_interface_claim() does.
+// Claiming is a host-side matter -- it takes ownership and allocates the
+// endpoints belonging to that alt setting -- and IDF's usb_host.c contains no
+// SET_INTERFACE at all. Without this the device stays on alt 0, which by
+// specification carries no endpoint and produces no data, so the host happily
+// polls and every isochronous packet completes with zero bytes. Measured
+// exactly that way before this call existed: submits fine, callbacks fire,
+// status COMPLETED, actual_num_bytes 0, forever.
+static int usbif_uac_set_interface(uint8_t itf, uint8_t alt) {
+    return usbif_uac_control(0x01, 0x0B, alt, itf, NULL, 0);
+}
+
 // Ask the device to run at `rate`. UAC 1.0 puts sampling frequency in an
 // *endpoint* control, three bytes little-endian. A device with a single fixed
 // rate may STALL this, which is not fatal -- it is already running at the only
 // rate it has -- so the result is reported and not treated as failure.
 static int usbif_uac_set_rate(uint32_t rate) {
-    usb_transfer_t *ctrl;
-    if (usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + 3, 0, &ctrl) != ESP_OK) {
-        return -1;
-    }
-    usb_setup_packet_t *setup = (usb_setup_packet_t *)ctrl->data_buffer;
-    setup->bmRequestType = UAC_REQTYPE_SET_EP;
-    setup->bRequest = UAC_SET_CUR;
-    setup->wValue = (uint16_t)(UAC_SAMPLING_FREQ_CONTROL << 8);
-    setup->wIndex = usbif_uach.ep;
-    setup->wLength = 3;
-    uint8_t *payload = ctrl->data_buffer + sizeof(usb_setup_packet_t);
-    payload[0] = (uint8_t)(rate & 0xFF);
-    payload[1] = (uint8_t)((rate >> 8) & 0xFF);
-    payload[2] = (uint8_t)((rate >> 16) & 0xFF);
-    ctrl->device_handle = usbif_uach.dev;
-    ctrl->bEndpointAddress = 0;
-    ctrl->num_bytes = sizeof(usb_setup_packet_t) + 3;
-    ctrl->callback = NULL;
-    ctrl->timeout_ms = 500;
-    esp_err_t err = usb_host_transfer_submit_control(usbif_host_client_get(), ctrl);
-    // Pump so the control transfer can actually retire before we free it.
-    for (int i = 0; i < 20; i++) {
-        usb_host_client_handle_events(usbif_host_client_get(), pdMS_TO_TICKS(5));
-    }
-    usb_host_transfer_free(ctrl);
-    return err == ESP_OK ? 0 : -2;
+    uint8_t payload[3] = {
+        (uint8_t)(rate & 0xFF),
+        (uint8_t)((rate >> 8) & 0xFF),
+        (uint8_t)((rate >> 16) & 0xFF),
+    };
+    return usbif_uac_control(UAC_REQTYPE_SET_EP, UAC_SET_CUR,
+        (uint16_t)(UAC_SAMPLING_FREQ_CONTROL << 8), usbif_uach.ep, payload, 3);
 }
 
 // --- public API ---------------------------------------------------------
@@ -251,6 +311,8 @@ int usbif_host_uac_open(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
     if (usb_host_interface_claim(usbif_host_client_get(), dev, itf, alt) != ESP_OK) {
         return -5;
     }
+    int sif = usbif_uac_set_interface(itf, alt);
+    printf("usbif_uac: SET_INTERFACE(%u, %u) -> %d\n", (unsigned)itf, (unsigned)alt, sif);
     if (rate) {
         usbif_uac_set_rate(rate);   // advisory: a fixed-rate device may STALL
     }
@@ -269,9 +331,15 @@ int usbif_host_uac_open(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
     }
 
     usbif_uach.open = true;
+    printf("usbif_uac: claimed itf %u alt %u ep 0x%02x mps %u rate %u\n",
+        (unsigned)itf, (unsigned)alt, (unsigned)ep, (unsigned)mps, (unsigned)rate);
     for (int i = 0; i < USBIF_UAC_NUM_XFER; i++) {
         usbif_uac_prepare(usbif_uach.xfer[i]);
-        if (usb_host_transfer_submit(usbif_uach.xfer[i]) == ESP_OK) {
+        esp_err_t serr = usb_host_transfer_submit(usbif_uach.xfer[i]);
+        printf("usbif_uac: submit[%d] num_bytes=%d pkts=%d -> 0x%x\n",
+            i, (int)usbif_uach.xfer[i]->num_bytes,
+            (int)usbif_uach.xfer[i]->num_isoc_packets, (unsigned)serr);
+        if (serr == ESP_OK) {
             usbif_uach.inflight++;
         } else {
             usbif_uach.errors++;
@@ -311,12 +379,13 @@ int usbif_host_uac_queued(void) {
 }
 
 void usbif_host_uac_stats(uint32_t *packets, uint32_t *bytes, uint32_t *dropped,
-    uint32_t *starved, uint32_t *errors) {
+    uint32_t *starved, uint32_t *errors, uint32_t *empty) {
     *packets = usbif_uach.packets;
     *bytes = usbif_uach.bytes;
     *dropped = usbif_uach.dropped;
     *starved = usbif_uach.starved;
     *errors = usbif_uach.errors;
+    *empty = usbif_uach.empty;
 }
 
 void usbif_host_uac_close(void) {

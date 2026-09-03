@@ -509,8 +509,16 @@ static void usbif_host_task(void *arg) {
 //
 // The pointer is into the host library's own cached descriptor, valid while
 // the device stays attached; the caller copies it immediately.
+// Defined below, after the class-driver plumbing that also uses it.
+int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
+
 int usbif_host_desc_get(uint32_t dev_id, const uint8_t **out, uint16_t *len) {
-    #if USBIF_HAVE_HOST
+    // No USBIF_HAVE_HOST guard here: that macro is defined in mod_usbif.c and
+    // nowhere else, so referencing it from this file made the whole body
+    // compile out and this function return -1 for every device -- which
+    // presented as "no such device" for a device the enumerator had just
+    // listed. The whole file is already inside CONFIG_SOC_USB_OTG_SUPPORTED,
+    // which is the guard that actually applies here.
     usb_device_handle_t dev;
     if (usbif_host_dev_lookup(dev_id, &dev) != 0) {
         return -1;
@@ -522,10 +530,6 @@ int usbif_host_desc_get(uint32_t dev_id, const uint8_t **out, uint16_t *len) {
     *out = (const uint8_t *)cfg;
     *len = cfg->wTotalLength;
     return 0;
-    #else
-    (void)dev_id; (void)out; (void)len;
-    return -1;
-    #endif
 }
 
 int usbif_host_start_c(void) {

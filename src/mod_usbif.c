@@ -87,7 +87,7 @@ extern int usbif_host_uac_read(uint8_t *out, size_t max);
 extern int usbif_host_uac_write(const uint8_t *data, size_t len);
 extern int usbif_host_uac_queued(void);
 extern void usbif_host_uac_stats(uint32_t *packets, uint32_t *bytes, uint32_t *dropped,
-    uint32_t *starved, uint32_t *errors);
+    uint32_t *starved, uint32_t *errors, uint32_t *empty);
 extern void usbif_host_uac_close(void);
 extern int usbif_host_midi_open(uint32_t dev_id);
 extern int usbif_host_midi_read(uint8_t *out, size_t max);
@@ -141,11 +141,14 @@ static const qstr usbif_speed_names[] = {
 // pending class drivers; CDC, HID and MSC host drivers now exist (unconditionally,
 // under the same USBIF_HAVE_HOST gate), so an honest answer names those three --
 // MIDI joined them (usbif_host_midi.c) once it became clear nobody upstream
-// supplies one. UAC/UVC host drivers still don't exist, so those bits stay
-// unset regardless of what a caller asks host_start() for.
+// supplies one, and UAC joined them with usbif_host_uac.c. UVC still has no
+// host driver, so that bit stays unset regardless of what a caller asks
+// host_start() for -- capabilities() reports what can actually be driven,
+// not what the enumerator can name.
 static uint16_t usbif_supported_classes(void) {
     #if USBIF_HAVE_HOST
-    return USBIF_CLASS_CDC | USBIF_CLASS_HID | USBIF_CLASS_MSC | USBIF_CLASS_MIDI;
+    return USBIF_CLASS_CDC | USBIF_CLASS_HID | USBIF_CLASS_MSC | USBIF_CLASS_MIDI
+        | USBIF_CLASS_UAC;
     #else
     return 0;
     #endif
@@ -821,16 +824,17 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uac_queued_obj, usbif_host_uac_queue
 // itself reported a bad packet (errors).
 static mp_obj_t usbif_host_uac_stats_py(void) {
     #if USBIF_HAVE_HOST
-    uint32_t packets = 0, bytes = 0, dropped = 0, starved = 0, errors = 0;
-    usbif_host_uac_stats(&packets, &bytes, &dropped, &starved, &errors);
-    mp_obj_t items[5] = {
+    uint32_t packets = 0, bytes = 0, dropped = 0, starved = 0, errors = 0, empty = 0;
+    usbif_host_uac_stats(&packets, &bytes, &dropped, &starved, &errors, &empty);
+    mp_obj_t items[6] = {
         mp_obj_new_int_from_uint(packets),
         mp_obj_new_int_from_uint(bytes),
         mp_obj_new_int_from_uint(dropped),
         mp_obj_new_int_from_uint(starved),
         mp_obj_new_int_from_uint(errors),
+        mp_obj_new_int_from_uint(empty),
     };
-    return mp_obj_new_tuple(5, items);
+    return mp_obj_new_tuple(6, items);
     #else
     return mp_const_none;
     #endif
