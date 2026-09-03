@@ -202,8 +202,13 @@ void usbif_pump_stop(void) {
     usbif_pump_running = false;
     usbif_pump_notify();
     // Let the task observe the flag and exit before the channel goes away.
-    for (int i = 0; i < 50 && usbif_pump_task_handle; i++) {
-        vTaskDelay(pdMS_TO_TICKS(2));
+    // pdMS_TO_TICKS(2) is ZERO ticks at this port's 100 Hz tick, and
+    // vTaskDelay(0) does not block -- so this loop used to fall straight
+    // through and tear the channel down under a task that had not exited.
+    // See USBIF_DELAY_TICKS in usbif_host_uac.c.
+    const TickType_t limit = (pdMS_TO_TICKS(100) > 0) ? pdMS_TO_TICKS(100) : 1;
+    for (TickType_t i = 0; i < limit && usbif_pump_task_handle; i++) {
+        vTaskDelay(1);
     }
     if (usbif_i2s_tx) {
         i2s_channel_disable(usbif_i2s_tx);

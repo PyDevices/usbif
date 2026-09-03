@@ -36,6 +36,10 @@
 #include "usb/usb_host.h"
 
 extern usb_host_client_handle_t usbif_host_client_get(void);
+extern void usbif_host_lock(void);
+extern void usbif_host_unlock(void);
+extern int usbif_host_lock_suspend(void);
+extern void usbif_host_lock_resume(int held);
 extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
 
 #define USBIF_MSC_MAX_MPS   (64)
@@ -97,11 +101,17 @@ static void usbif_msc_recover(void) {
     usb_host_endpoint_clear(usbif_msc.dev, usbif_msc.ep_out);
 }
 
-void usbif_msc_close(void);
+static void usbif_msc_close_locked(void);
 
 static void usbif_msc_cb(usb_transfer_t *transfer) {
     (void)transfer;
     usbif_msc.done = true;
+}
+
+void usbif_msc_close(void) {
+    usbif_host_lock();
+    usbif_msc_close_locked();
+    usbif_host_unlock();
 }
 
 static void usbif_msc_ctrl_cb(usb_transfer_t *transfer) {
@@ -137,9 +147,14 @@ static void usbif_msc_bot_reset(void) {
         usbif_msc.xfer_ctrl) != ESP_OK) {
         return;
     }
+    // Suspended across the wait: the completion callback is delivered by the
+    // host task, which this lock excludes. Holding it here cannot be slow,
+    // only fatal.
+    int held = usbif_host_lock_suspend();
     for (int i = 0; i < 50 && !usbif_msc.ctrl_done; i++) {
         vTaskDelay(1);
     }
+    usbif_host_lock_resume(held);
 }
 
 // Run one transfer stage to completion. Returns actual bytes, or -1.
@@ -159,9 +174,14 @@ static int usbif_msc_stage(uint8_t ep, const void *out_data, size_t len) {
     if (usb_host_transfer_submit(usbif_msc.xfer) != ESP_OK) {
         return -1;
     }
+    // Suspended across the wait: the completion callback is delivered by the
+    // host task, which this lock excludes. Holding it here cannot be slow,
+    // only fatal.
+    int held = usbif_host_lock_suspend();
     for (int i = 0; i < USBIF_MSC_TIMEOUT_TICKS && !usbif_msc.done; i++) {
         vTaskDelay(1);
     }
+    usbif_host_lock_resume(held);
     usbif_msc_last_xfer_status = (uint8_t)usbif_msc.xfer->status;
     if (!usbif_msc.done || usbif_msc.xfer->status != USB_TRANSFER_STATUS_COMPLETED) {
         return -1;
@@ -321,7 +341,7 @@ static bool usbif_msc_find_itf(const usb_config_desc_t *cfg) {
     return have && usbif_msc.ep_in && usbif_msc.ep_out;
 }
 
-int usbif_msc_open(uint32_t dev_id) {
+static int usbif_msc_open_locked(uint32_t dev_id) {
     if (usbif_msc.open) {
         return -1;
     }
@@ -379,6 +399,13 @@ int usbif_msc_open(uint32_t dev_id) {
     return 0;
 }
 
+int usbif_msc_open(uint32_t dev_id) {
+    usbif_host_lock();
+    int r = usbif_msc_open_locked(dev_id);
+    usbif_host_unlock();
+    return r;
+}
+
 int usbif_msc_info(uint32_t *num_blocks, uint32_t *block_size, const char **inquiry) {
     if (!usbif_msc.open) {
         return -1;
@@ -389,7 +416,7 @@ int usbif_msc_info(uint32_t *num_blocks, uint32_t *block_size, const char **inqu
     return 0;
 }
 
-int usbif_msc_read_block(uint32_t lba, uint8_t *out, size_t max) {
+static int usbif_msc_read_block_locked(uint32_t lba, uint8_t *out, size_t max) {
     if (!usbif_msc.open) {
         return -1;
     }
@@ -408,6 +435,13 @@ int usbif_msc_read_block(uint32_t lba, uint8_t *out, size_t max) {
     return n == (int)usbif_msc.block_size ? n : -3;
 }
 
+int usbif_msc_read_block(uint32_t lba, uint8_t *out, size_t max) {
+    usbif_host_lock();
+    int r = usbif_msc_read_block_locked(lba, out, max);
+    usbif_host_unlock();
+    return r;
+}
+
 // WRITE(10). The mirror of the read above, and the reason the header's
 // original "writes are deliberately absent" note no longer holds: logging
 // is the case that asked for it -- a board writing its own sensor data to
@@ -416,7 +450,7 @@ int usbif_msc_read_block(uint32_t lba, uint8_t *out, size_t max) {
 // The caller supplies exactly one block. A partial buffer is refused
 // rather than padded: silently writing whatever follows a short buffer
 // into the remainder of a sector is how a filesystem gets quiet damage.
-int usbif_msc_write_block(uint32_t lba, const uint8_t *data, size_t len) {
+static int usbif_msc_write_block_locked(uint32_t lba, const uint8_t *data, size_t len) {
     if (!usbif_msc.open) {
         return -1;
     }
@@ -435,6 +469,13 @@ int usbif_msc_write_block(uint32_t lba, const uint8_t *data, size_t len) {
     return n == (int)usbif_msc.block_size ? n : -3;
 }
 
+int usbif_msc_write_block(uint32_t lba, const uint8_t *data, size_t len) {
+    usbif_host_lock();
+    int r = usbif_msc_write_block_locked(lba, data, len);
+    usbif_host_unlock();
+    return r;
+}
+
 // Diagnostic: issue a SCSI opcode the device is required to reject, so the
 // failure path can be *proven* rather than assumed. 0xFF is not a defined
 // command; a conforming device answers CHECK CONDITION with sense key
@@ -447,7 +488,7 @@ int usbif_msc_write_block(uint32_t lba, const uint8_t *data, size_t len) {
 // failure path that has never been taken is a guess, and this module has
 // already been bitten once by exactly that (see the descriptor validator
 // in the findings).
-int usbif_msc_provoke_error(void) {
+static int usbif_msc_provoke_error_locked(void) {
     if (!usbif_msc.open) {
         return -1;
     }
@@ -455,7 +496,14 @@ int usbif_msc_provoke_error(void) {
     return usbif_msc_xact(cb, 6, NULL, NULL, 0);
 }
 
-void usbif_msc_close(void) {
+int usbif_msc_provoke_error(void) {
+    usbif_host_lock();
+    int r = usbif_msc_provoke_error_locked();
+    usbif_host_unlock();
+    return r;
+}
+
+static void usbif_msc_close_locked(void) {
     if (!usbif_msc.open) {
         return;
     }

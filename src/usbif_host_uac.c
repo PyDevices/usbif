@@ -43,6 +43,12 @@
 #include "usb/usb_host.h"
 
 extern usb_host_client_handle_t usbif_host_client_get(void);
+extern void usbif_host_lock(void);
+extern void usbif_host_unlock(void);
+extern volatile uint32_t usbif_host_pump_count;
+extern void usbif_host_lock_debug(const char *tag);
+extern int usbif_host_lock_suspend(void);
+extern void usbif_host_lock_resume(int held);
 extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
 
 // Packets per transfer, and transfers in flight. 8 x 1 ms packets per
@@ -53,6 +59,36 @@ extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
 #define USBIF_UAC_NUM_XFER      (3)
 #define USBIF_UAC_MAX_MPS       (256)
 #define USBIF_UAC_RING          (8192)
+
+// How long a control transfer may take to be *retired*, which is not the same
+// as how long the device takes to answer. EP0 is shared, and a hub enumerating
+// another device behind this one holds it: opening the CODEC while the mic
+// behind it was still enumerating, the SET_INTERFACE callback arrived after
+// more than 500 ms -- measured, by counting callbacks, as zero during the
+// wait and two by the time the next request finished. The old 500 ms bound
+// gave up on a transfer that was merely queued, and (before the ownership fix
+// above) freed it while the library still owned it. Three seconds is far
+// longer than any device needs and still bounded.
+#define USBIF_UAC_CTRL_TIMEOUT_MS   (3000)
+
+// pdMS_TO_TICKS() truncates, and this port runs at CONFIG_FREERTOS_HZ=100 --
+// one tick is 10 ms, so *any* value below 10 ms becomes ZERO ticks. And
+// vTaskDelay(0) does not block: it yields to equal-priority tasks and returns
+// immediately. A wait loop built from those is not a wait at all. It runs to
+// completion in microseconds, while the task whose callback it is waiting for
+// never gets scheduled.
+//
+// That is the root of this module's isochronous crashes. The control-transfer
+// "500 ms" wait was 100 iterations of vTaskDelay(0); it always fell through
+// with the callback still pending, concluded the transfer had failed, and
+// freed it while the USB host library still owned it. The panic then landed
+// wherever the heap was next touched -- inside TLSF, or inside IDF's
+// handle_ep0_dequeue() -- which is why it read as memory corruption from an
+// unrelated allocation rather than as a timeout here.
+//
+// Always at least one real tick.
+#define USBIF_DELAY_TICKS(ms) ((pdMS_TO_TICKS(ms) > 0) ? pdMS_TO_TICKS(ms) : 1)
+
 
 // UAC 1.0 endpoint control request: SET_CUR of SAMPLING_FREQ_CONTROL.
 #define UAC_SET_CUR                 (0x01)
@@ -126,23 +162,30 @@ static void usbif_uac_prepare(usb_transfer_t *xfer) {
     // it is a property of the allocation rather than of this submission.
     uint32_t total = 0;
     for (int i = 0; i < USBIF_UAC_PKTS_PER_XFER; i++) {
-        uint32_t want = usbif_uach.mps;
+        const uint32_t want = usbif_uach.mps;
         if (!usbif_uach.is_in) {
+            // Playback always sends a full packet. Where the ring is short,
+            // the remainder is silence -- an underrun in audio is silence,
+            // not a stall, and the stream must keep its slot on the bus.
             uint32_t have = usbif_uac_ring_used();
-            if (have < want) {
-                want = have;
-                if (want == 0) {
-                    usbif_uach.starved++;
-                }
+            uint32_t take = have < want ? have : want;
+            if (take) {
+                usbif_uac_ring_pop(xfer->data_buffer + total, take);
             }
-            if (want) {
-                usbif_uac_ring_pop(xfer->data_buffer + total, want);
+            if (take < want) {
+                memset(xfer->data_buffer + total + take, 0, want - take);
+                usbif_uach.starved++;
             }
         }
         xfer->isoc_packet_desc[i].num_bytes = want;
         total += want;
     }
-    xfer->num_bytes = total ? total : usbif_uach.mps;
+    // IDF requires num_bytes to equal the sum of the packet lengths exactly:
+    // usbh.c's transfer_check_usb_compliance() rejects any mismatch with a
+    // bare ESP_ERR_INVALID_ARG. An earlier version shortened packets to
+    // whatever the ring held and left num_bytes at mps, so every submit was
+    // refused the moment the ring was empty -- which is always, at open.
+    xfer->num_bytes = total;
 }
 
 static volatile uint32_t usbif_uac_cb_count;
@@ -207,9 +250,17 @@ static volatile bool usbif_uac_ctrl_done;
 // fails it before the transfer is ever attempted, returning ESP_ERR_INVALID_ARG
 // with no hint that the callback is what it objected to. A control transfer
 // this code intends to wait for still needs one, so this exists to set a flag.
+// Matched against the transfer actually being waited on. A control transfer
+// that timed out is not cancelled -- it is still queued, and its callback can
+// arrive later. Without this check that late callback would land on whatever
+// transfer the next request is waiting for and declare it complete while it
+// is still in flight.
+static usb_transfer_t *volatile usbif_uac_ctrl_active;
+
 static void usbif_uac_ctrl_cb(usb_transfer_t *xfer) {
-    (void)xfer;
-    usbif_uac_ctrl_done = true;
+    if (xfer == usbif_uac_ctrl_active) {
+        usbif_uac_ctrl_done = true;
+    }
 }
 
 // One control transfer, synchronous: submit, pump until the callback fires,
@@ -233,21 +284,52 @@ static int usbif_uac_control(uint8_t req_type, uint8_t request, uint16_t value,
     ctrl->bEndpointAddress = 0;
     ctrl->num_bytes = sizeof(usb_setup_packet_t) + len;
     ctrl->callback = usbif_uac_ctrl_cb;
-    ctrl->timeout_ms = 500;
+    ctrl->timeout_ms = USBIF_UAC_CTRL_TIMEOUT_MS;
     usbif_uac_ctrl_done = false;
+    usbif_uac_ctrl_active = ctrl;
     esp_err_t err = usb_host_transfer_submit_control(usbif_host_client_get(), ctrl);
-    // Wait for the completion rather than pumping a fixed number of times:
-    // the transfer is only safe to free once its callback has run, and a
-    // fixed count is either too short (freeing under a live URB) or wasted
-    // time. Bounded so a device that never answers cannot hang setup.
-    for (int i = 0; i < 100 && !usbif_uac_ctrl_done; i++) {
-        usb_host_client_handle_events(usbif_host_client_get(), pdMS_TO_TICKS(5));
+    if (err != ESP_OK) {
+        // Never submitted, so never queued: ours to free.
+        usbif_uac_ctrl_active = NULL;
+        usb_host_transfer_free(ctrl);
+        return -2;
     }
+    // WAIT, do not pump. The host task is already calling
+    // usb_host_client_handle_events() on this same client in its own loop,
+    // and a second caller from the MicroPython thread races it: observed as
+    // heap corruption, surfacing later as a StoreProhibited panic inside
+    // TLSF's remove_free_block during an unrelated allocation. The class
+    // drivers' _for_host_stop variants pump explicitly and are safe doing so
+    // precisely because the host task has already exited by then; during
+    // normal operation it has not.
+    //
+    // So sleep and let the task deliver the callback. Bounded so a device
+    // that never answers cannot hang setup.
+    // Suspended across the wait: the completion callback is delivered by the
+    // host task, which this lock excludes. Holding it here cannot be slow,
+    // only fatal.
+    int held = usbif_host_lock_suspend();
+    const TickType_t limit = USBIF_DELAY_TICKS(USBIF_UAC_CTRL_TIMEOUT_MS);
+    for (TickType_t i = 0; i < limit && !usbif_uac_ctrl_done; i++) {
+        vTaskDelay(1);
+    }
+    usbif_host_lock_resume(held);
     printf("usbif_uac: ctrl req=0x%02x val=0x%04x idx=0x%04x len=%u submit=0x%x status=%d actual=%d\n",
         (unsigned)request, (unsigned)value, (unsigned)index, (unsigned)len,
         (unsigned)err, (int)ctrl->status, (int)ctrl->actual_num_bytes);
+    if (!usbif_uac_ctrl_done) {
+        // The device never answered. The transfer is still queued on EP0, so
+        // the library will dequeue it eventually and touch this memory --
+        // freeing it here is what produced the LoadProhibited panic inside
+        // handle_ep0_dequeue(). Deliberately leaked: one 8-byte transfer,
+        // once, on a device that is already misbehaving, against corrupting
+        // the heap of a board that has to keep running.
+        usbif_uac_ctrl_active = NULL;
+        return -3;
+    }
+    usbif_uac_ctrl_active = NULL;
     usb_host_transfer_free(ctrl);
-    return err == ESP_OK ? 0 : -2;
+    return 0;
 }
 
 // Tell the DEVICE to switch to the streaming alternate setting.
@@ -280,7 +362,7 @@ static int usbif_uac_set_rate(uint32_t rate) {
 
 // --- public API ---------------------------------------------------------
 
-int usbif_host_uac_open(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
+static int usbif_host_uac_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
     uint16_t mps, uint32_t rate) {
     if (usbif_uach.open) {
         return -1;
@@ -308,7 +390,10 @@ int usbif_host_uac_open(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
     if (alt == 0) {
         return -4;
     }
-    if (usb_host_interface_claim(usbif_host_client_get(), dev, itf, alt) != ESP_OK) {
+    esp_err_t cerr = usb_host_interface_claim(usbif_host_client_get(), dev, itf, alt);
+    printf("usbif_uac: interface_claim(itf=%u alt=%u) -> 0x%x\n",
+        (unsigned)itf, (unsigned)alt, (unsigned)cerr);
+    if (cerr != ESP_OK) {
         return -5;
     }
     int sif = usbif_uac_set_interface(itf, alt);
@@ -357,6 +442,14 @@ int usbif_host_uac_open(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
     return 0;
 }
 
+int usbif_host_uac_open(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
+    uint16_t mps, uint32_t rate) {
+    usbif_host_lock();
+    int r = usbif_host_uac_open_locked(dev_id, itf, alt, ep, mps, rate);
+    usbif_host_unlock();
+    return r;
+}
+
 int usbif_host_uac_read(uint8_t *out, size_t max) {
     if (!usbif_uach.open || !usbif_uach.is_in) {
         return -1;
@@ -388,7 +481,7 @@ void usbif_host_uac_stats(uint32_t *packets, uint32_t *bytes, uint32_t *dropped,
     *empty = usbif_uach.empty;
 }
 
-void usbif_host_uac_close(void) {
+static void usbif_host_uac_close_locked(void) {
     if (!usbif_uach.open) {
         return;
     }
@@ -396,9 +489,15 @@ void usbif_host_uac_close(void) {
     // Let the in-flight transfers retire before their buffers go away: an
     // isochronous transfer is scheduled bus time, and freeing underneath one
     // is how a host stack gets corrupted rather than merely stopped.
-    for (int i = 0; i < 40 && usbif_uach.inflight; i++) {
-        usb_host_client_handle_events(usbif_host_client_get(), pdMS_TO_TICKS(5));
+    // Suspended for the same reason as the control wait: `inflight` only
+    // falls when the host task delivers the completion callbacks, and this
+    // lock is what keeps it out.
+    int drain_held = usbif_host_lock_suspend();
+    const TickType_t drain_limit = USBIF_DELAY_TICKS(200);
+    for (TickType_t i = 0; i < drain_limit && usbif_uach.inflight; i++) {
+        vTaskDelay(1);
     }
+    usbif_host_lock_resume(drain_held);
     for (int i = 0; i < USBIF_UAC_NUM_XFER; i++) {
         if (usbif_uach.xfer[i]) {
             usb_host_transfer_free(usbif_uach.xfer[i]);
@@ -409,6 +508,12 @@ void usbif_host_uac_close(void) {
     // which matters on a full-speed bus where that reservation is the scarce
     // resource every other device is competing for.
     usb_host_interface_release(usbif_host_client_get(), usbif_uach.dev, usbif_uach.itf);
+}
+
+void usbif_host_uac_close(void) {
+    usbif_host_lock();
+    usbif_host_uac_close_locked();
+    usbif_host_unlock();
 }
 
 // Called from host_stop()'s teardown, with the event pump explicit because

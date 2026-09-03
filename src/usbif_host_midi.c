@@ -45,6 +45,10 @@
 #include "shared/usbif_midi_packet.h"
 
 extern usb_host_client_handle_t usbif_host_client_get(void);
+extern void usbif_host_lock(void);
+extern void usbif_host_unlock(void);
+extern int usbif_host_lock_suspend(void);
+extern void usbif_host_lock_resume(int held);
 extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
 
 #define USBIF_MIDI_RX_RING (512)
@@ -147,7 +151,7 @@ static bool usbif_midih_find_itf(const usb_config_desc_t *cfg) {
     return have && usbif_midih.ep_in;
 }
 
-int usbif_host_midi_open(uint32_t dev_id) {
+static int usbif_host_midi_open_locked(uint32_t dev_id) {
     if (usbif_midih.open) {
         return -1;
     }
@@ -190,6 +194,13 @@ int usbif_host_midi_open(uint32_t dev_id) {
     return 0;
 }
 
+int usbif_host_midi_open(uint32_t dev_id) {
+    usbif_host_lock();
+    int r = usbif_host_midi_open_locked(dev_id);
+    usbif_host_unlock();
+    return r;
+}
+
 // Pop decoded MIDI bytes. Same shape as usbif_cdc_read: whatever has
 // arrived, up to max.
 int usbif_host_midi_read(uint8_t *out, size_t max) {
@@ -209,7 +220,7 @@ int usbif_host_midi_read(uint8_t *out, size_t max) {
 // than offered -- the codec leaves a partial trailing message for the next
 // call rather than sending half of it. See shared/usbif_midi_packet.h for
 // that rule and the two deliberate refusals behind it.
-int usbif_host_midi_write(const uint8_t *data, size_t len) {
+static int usbif_host_midi_write_locked(const uint8_t *data, size_t len) {
     if (!usbif_midih.open) {
         return -1;
     }
@@ -219,9 +230,14 @@ int usbif_host_midi_write(const uint8_t *data, size_t len) {
     if (len == 0) {
         return 0;
     }
+    // Suspended across the wait: the completion callback is delivered by the
+    // host task, which this lock excludes. Holding it here cannot be slow,
+    // only fatal.
+    int held = usbif_host_lock_suspend();
     for (int i = 0; i < 20 && usbif_midih.out_busy; i++) {
         vTaskDelay(1);
     }
+    usbif_host_lock_resume(held);
     if (usbif_midih.out_busy) {
         return 0;
     }
@@ -244,6 +260,13 @@ int usbif_host_midi_write(const uint8_t *data, size_t len) {
         return -2;
     }
     return (int)consumed;
+}
+
+int usbif_host_midi_write(const uint8_t *data, size_t len) {
+    usbif_host_lock();
+    int r = usbif_host_midi_write_locked(data, len);
+    usbif_host_unlock();
+    return r;
 }
 
 uint32_t usbif_host_midi_rx_dropped(void) {
@@ -300,12 +323,14 @@ static void usbif_midih_release(void) {
         if (err == ESP_OK) {
             break;
         }
+        int held = usbif_host_lock_suspend();
         vTaskDelay(1);      // one 10 ms tick; ~250 ms bound in total
+        usbif_host_lock_resume(held);
     }
     usbif_host_midi_release_failed = (err == ESP_OK) ? 0 : 1;
 }
 
-void usbif_host_midi_close(void) {
+static void usbif_host_midi_close_locked(void) {
     if (!usbif_midih.open) {
         return;
     }
@@ -313,6 +338,12 @@ void usbif_host_midi_close(void) {
     vTaskDelay(pdMS_TO_TICKS(20));
     usbif_midih_quiesce();
     usbif_midih_release();
+}
+
+void usbif_host_midi_close(void) {
+    usbif_host_lock();
+    usbif_host_midi_close_locked();
+    usbif_host_unlock();
 }
 
 // Teardown-only variant, for usbif_host.c's host_stop() path. Same reason

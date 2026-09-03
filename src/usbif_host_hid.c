@@ -31,6 +31,10 @@
 #include "usb/usb_host.h"
 
 extern usb_host_client_handle_t usbif_host_client_get(void);
+extern void usbif_host_lock(void);
+extern void usbif_host_unlock(void);
+extern int usbif_host_lock_suspend(void);
+extern void usbif_host_lock_resume(int held);
 extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
 
 #define USBIF_HID_RX_RING (512)
@@ -105,7 +109,7 @@ static bool usbif_hid_find_itf(const usb_config_desc_t *cfg) {
     return have && usbif_hid.ep_in;
 }
 
-int usbif_hid_open(uint32_t dev_id) {
+static int usbif_hid_open_locked(uint32_t dev_id) {
     if (usbif_hid.open) {
         return -1;
     }
@@ -142,6 +146,13 @@ int usbif_hid_open(uint32_t dev_id) {
         return -8;
     }
     return 0;
+}
+
+int usbif_hid_open(uint32_t dev_id) {
+    usbif_host_lock();
+    int r = usbif_hid_open_locked(dev_id);
+    usbif_host_unlock();
+    return r;
 }
 
 // Pop one length-prefixed report; returns its length, 0 if none waiting.
@@ -197,12 +208,14 @@ static void usbif_hid_release(void) {
         if (err == ESP_OK) {
             break;
         }
+        int held = usbif_host_lock_suspend();
         vTaskDelay(1);
+        usbif_host_lock_resume(held);
     }
     usbif_hid_release_failed = (err == ESP_OK) ? 0 : 1;
 }
 
-void usbif_hid_close(void) {
+static void usbif_hid_close_locked(void) {
     if (!usbif_hid.open) {
         return;
     }
@@ -212,6 +225,12 @@ void usbif_hid_close(void) {
     usb_host_endpoint_flush(usbif_hid.dev, usbif_hid.ep_in);
     usb_host_endpoint_clear(usbif_hid.dev, usbif_hid.ep_in);
     usbif_hid_release();
+}
+
+void usbif_hid_close(void) {
+    usbif_host_lock();
+    usbif_hid_close_locked();
+    usbif_host_unlock();
 }
 
 // Teardown-only variant for usbif_host.c's host_stop() path. The halt/flush

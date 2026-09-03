@@ -42,6 +42,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"   // xTaskCreatePinnedToCore on IDF 5
+#include "freertos/semphr.h"
 #include "esp_intr_alloc.h"
 #include "esp_cpu.h"
 #include "usb/usb_host.h"
@@ -78,7 +79,100 @@ typedef struct {
 
 static usbif_host_slot_t usbif_host_devs[USBIF_HOST_MAX_DEVS];
 static usb_host_client_handle_t usbif_host_client;
+
+// The client handle is not safe to drive from two tasks at once. The host
+// task sits in usb_host_client_handle_events(), which runs enumeration --
+// opening devices, fetching descriptors, claiming and releasing interfaces
+// for the class filter -- while the MicroPython thread independently calls
+// usb_host_interface_claim() and usb_host_transfer_alloc() through the
+// public API. Both allocate. Overlapping them corrupts the heap: opening the
+// CODEC the instant it appeared, with the mic behind it still enumerating,
+// reliably panicked in TLSF's remove_free_block() on the next allocation --
+// and the identical open, run two seconds later with the bus quiet, is
+// clean. The crash therefore points at whatever allocates next, never at the
+// code that actually raced, which is why this took a controlled A/B to see.
+//
+// Recursive, deliberately: class drivers call these same IDF functions from
+// inside usbif_host_on_new_dev(), i.e. already inside the host task's own
+// locked region. A plain mutex would deadlock there. Recursion lets the lock
+// live at the entry points -- the task loop, and each public open/close --
+// instead of at all ~90 individual IDF call sites.
+static SemaphoreHandle_t usbif_host_client_mutex;
+
+// Declared here rather than at its definition below: the lock helpers need
+// to tell the host task apart from an API caller, and they come first.
 static TaskHandle_t usbif_host_task_handle;
+
+// Depth held by API-side callers (i.e. anyone that is not the host task).
+// Only that side ever suspends the lock, so only that side is counted.
+static int usbif_api_lock_depth;
+volatile uint32_t usbif_host_pump_count;
+volatile int usbif_host_stage;
+
+void usbif_host_lock(void) {
+    if (usbif_host_client_mutex != NULL) {
+        xSemaphoreTakeRecursive(usbif_host_client_mutex, portMAX_DELAY);
+        if (xTaskGetCurrentTaskHandle() != usbif_host_task_handle) {
+            usbif_api_lock_depth++;
+        }
+    }
+}
+
+void usbif_host_unlock(void) {
+    if (usbif_host_client_mutex != NULL) {
+        if (xTaskGetCurrentTaskHandle() != usbif_host_task_handle) {
+            usbif_api_lock_depth--;
+        }
+        xSemaphoreGiveRecursive(usbif_host_client_mutex);
+    }
+}
+
+// Drop the lock across a wait, and take it back afterwards.
+//
+// Every class driver submits a transfer and then waits for its completion
+// callback -- and that callback is delivered by the host task, from inside
+// the very event pumps this lock excludes. Waiting while holding it is
+// therefore not slow, it is a guaranteed deadlock: the callback can never
+// arrive, the wait always runs to its timeout, and the caller then treats a
+// still-live transfer as finished. That is exactly how adding the lock
+// turned usbif_uac_control()'s unconditional free into a reproducible panic
+// inside IDF's handle_ep0_dequeue().
+//
+// Recursive depth is why this cannot be a plain unlock: a wrapped entry
+// point may itself have been reached through another. Give back every level
+// this task holds, then restore the same count.
+void usbif_host_lock_debug(const char *tag) {
+    TaskHandle_t holder = (usbif_host_client_mutex != NULL)
+        ? xSemaphoreGetMutexHolder(usbif_host_client_mutex) : NULL;
+    printf("usbif_host: %s holder=%p self=%p task=%p state=%d depth=%d stage=%d\n",
+        tag, (void *)holder, (void *)xTaskGetCurrentTaskHandle(),
+        (void *)usbif_host_task_handle,
+        (int)(usbif_host_task_handle ? eTaskGetState(usbif_host_task_handle) : -1),
+        usbif_api_lock_depth, usbif_host_stage);
+}
+
+int usbif_host_lock_suspend(void) {
+    if (usbif_host_client_mutex == NULL ||
+        xTaskGetCurrentTaskHandle() == usbif_host_task_handle) {
+        return 0;
+    }
+    int held = usbif_api_lock_depth;
+    for (int i = 0; i < held; i++) {
+        usbif_api_lock_depth--;
+        xSemaphoreGiveRecursive(usbif_host_client_mutex);
+    }
+    return held;
+}
+
+void usbif_host_lock_resume(int held) {
+    if (usbif_host_client_mutex == NULL) {
+        return;
+    }
+    for (int i = 0; i < held; i++) {
+        xSemaphoreTakeRecursive(usbif_host_client_mutex, portMAX_DELAY);
+        usbif_api_lock_depth++;
+    }
+}
 static volatile bool usbif_host_task_running;
 // Set once teardown begins, so no device is opened after the close loop has
 // already passed over it. See usbif_host_on_new_dev() for why this exists.
@@ -150,6 +244,7 @@ static uint16_t usbif_class_bits(const usb_config_desc_t *cfg) {
 }
 
 static void usbif_host_on_new_dev(uint8_t addr) {
+    usbif_host_stage = 100;
     if (usbif_host_tearing_down) {
         // Teardown has started. Do NOT open this device.
         //
@@ -350,8 +445,30 @@ static void usbif_host_task(void *arg) {
     // collects whatever that produced without waiting.
     while (usbif_host_task_running) {
         uint32_t flags = 0;
-        usb_host_lib_handle_events(pdMS_TO_TICKS(10), &flags);
+        // Both pumps, under the lock. The first version locked only the
+        // client pump, on the theory that enumeration lived there -- it does
+        // not. Enumeration runs in the *library* context, so leaving that
+        // call unlocked left the race open; the observable effect was that
+        // the panic moved later (past SET_INTERFACE, into the next
+        // allocation) rather than going away. A crash that merely relocates
+        // is evidence of a narrowed race, not a fixed one.
+        //
+        // Both timeouts are 0 so the lock is held for microseconds rather
+        // than across an idle wait, and the sleep that paces the loop is
+        // taken *outside* it. Holding a 10 ms blocking pump under this mutex
+        // would leave the task re-acquiring it almost continuously and could
+        // starve the API side it exists to admit.
+        usbif_host_stage = 1;
+        usbif_host_lock();
+        usbif_host_stage = 2;
+        usb_host_lib_handle_events(0, &flags);
+        usbif_host_stage = 3;
         usb_host_client_handle_events(usbif_host_client, 0);
+        usbif_host_stage = 4;
+        usbif_host_pump_count++;
+        usbif_host_unlock();
+        usbif_host_stage = 5;
+        vTaskDelay(1);
     }
 
     // Teardown, in the order the library requires: close what we opened,
@@ -451,8 +568,14 @@ static void usbif_host_task(void *arg) {
     // ALL_FREE wait below, cheap next to a wedge.
     for (int i = 0; i < 20; i++) {
         uint32_t flags = 0;
-        usb_host_lib_handle_events(pdMS_TO_TICKS(10), &flags);
-        usb_host_client_handle_events(usbif_host_client, pdMS_TO_TICKS(10));
+        usbif_host_lock();
+        usb_host_lib_handle_events(0, &flags);
+        usb_host_client_handle_events(usbif_host_client, 0);
+        usbif_host_unlock();
+        // The real wait the drain needs, kept outside the lock. See the
+        // note above this loop: the wall-clock time matters, holding the
+        // mutex through it does not.
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
     printf("usbif_host: pre-deregister drain done\n");
     esp_err_t dereg_err = usb_host_client_deregister(usbif_host_client);
@@ -512,7 +635,7 @@ static void usbif_host_task(void *arg) {
 // Defined below, after the class-driver plumbing that also uses it.
 int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
 
-int usbif_host_desc_get(uint32_t dev_id, const uint8_t **out, uint16_t *len) {
+static int usbif_host_desc_get_locked(uint32_t dev_id, const uint8_t **out, uint16_t *len) {
     // No USBIF_HAVE_HOST guard here: that macro is defined in mod_usbif.c and
     // nowhere else, so referencing it from this file made the whole body
     // compile out and this function return -1 for every device -- which
@@ -530,6 +653,13 @@ int usbif_host_desc_get(uint32_t dev_id, const uint8_t **out, uint16_t *len) {
     *out = (const uint8_t *)cfg;
     *len = cfg->wTotalLength;
     return 0;
+}
+
+int usbif_host_desc_get(uint32_t dev_id, const uint8_t **out, uint16_t *len) {
+    usbif_host_lock();
+    int r = usbif_host_desc_get_locked(dev_id, out, len);
+    usbif_host_unlock();
+    return r;
 }
 
 int usbif_host_start_c(void) {
@@ -568,6 +698,16 @@ int usbif_host_start_c(void) {
     tud_deinit(TUD_OPT_RHPORT);
     usb_phy_otg_release();
     #endif
+
+    // Created once and never deleted: it outlives any single host session,
+    // and a start/stop cycle that recreated it would race the very callers it
+    // exists to serialise.
+    if (usbif_host_client_mutex == NULL) {
+        usbif_host_client_mutex = xSemaphoreCreateRecursiveMutex();
+        if (usbif_host_client_mutex == NULL) {
+            goto restore_device;
+        }
+    }
 
     usbif_host_install_result = USBIF_HOST_INSTALL_PENDING;
     usbif_host_tearing_down = false;

@@ -31,6 +31,10 @@
 // From usbif_host.c: the client handle and a device lookup by the dev_id
 // the event transport reported to Python.
 extern usb_host_client_handle_t usbif_host_client_get(void);
+extern void usbif_host_lock(void);
+extern void usbif_host_unlock(void);
+extern int usbif_host_lock_suspend(void);
+extern void usbif_host_lock_resume(int held);
 extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
 
 #define USBIF_CDC_RX_RING (1024)
@@ -133,7 +137,7 @@ static bool usbif_cdc_find_itfs(const usb_config_desc_t *cfg) {
     return have_data && usbif_cdc.ep_in && usbif_cdc.ep_out;
 }
 
-int usbif_cdc_open(uint32_t dev_id) {
+static int usbif_cdc_open_locked(uint32_t dev_id) {
     if (usbif_cdc.open) {
         return -1;
     }
@@ -200,14 +204,26 @@ int usbif_cdc_open(uint32_t dev_id) {
     return 0;
 }
 
-int usbif_cdc_write(const uint8_t *data, size_t len) {
+int usbif_cdc_open(uint32_t dev_id) {
+    usbif_host_lock();
+    int r = usbif_cdc_open_locked(dev_id);
+    usbif_host_unlock();
+    return r;
+}
+
+static int usbif_cdc_write_locked(const uint8_t *data, size_t len) {
     if (!usbif_cdc.open || len == 0) {
         return usbif_cdc.open ? 0 : -1;
     }
     // One OUT transfer in flight at a time; REPL traffic never notices.
+    // Suspended across the wait: the completion callback is delivered by the
+    // host task, which this lock excludes. Holding it here cannot be slow,
+    // only fatal.
+    int held = usbif_host_lock_suspend();
     for (int i = 0; i < 20 && usbif_cdc.out_busy; i++) {
         vTaskDelay(1);
     }
+    usbif_host_lock_resume(held);
     if (usbif_cdc.out_busy) {
         return 0;
     }
@@ -223,6 +239,13 @@ int usbif_cdc_write(const uint8_t *data, size_t len) {
         return -2;
     }
     return (int)n;
+}
+
+int usbif_cdc_write(const uint8_t *data, size_t len) {
+    usbif_host_lock();
+    int r = usbif_cdc_write_locked(data, len);
+    usbif_host_unlock();
+    return r;
 }
 
 int usbif_cdc_read(uint8_t *out, size_t max) {
@@ -272,12 +295,14 @@ static void usbif_cdc_release(void) {
         if (err == ESP_OK) {
             break;
         }
+        int held = usbif_host_lock_suspend();
         vTaskDelay(1);
+        usbif_host_lock_resume(held);
     }
     usbif_cdc_release_failed = (err == ESP_OK) ? 0 : 1;
 }
 
-void usbif_cdc_close(void) {
+static void usbif_cdc_close_locked(void) {
     if (!usbif_cdc.open) {
         return;
     }
@@ -285,6 +310,12 @@ void usbif_cdc_close(void) {
     vTaskDelay(pdMS_TO_TICKS(20));      // let in-flight callbacks drain
     usbif_cdc_quiesce();
     usbif_cdc_release();
+}
+
+void usbif_cdc_close(void) {
+    usbif_host_lock();
+    usbif_cdc_close_locked();
+    usbif_host_unlock();
 }
 
 // Teardown-only variant -- see usbif_hid_close_for_host_stop()'s comment in
