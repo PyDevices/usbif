@@ -246,6 +246,7 @@ extern void usbif_cdc_close_for_host_stop(void);
 extern void usbif_hid_close_for_host_stop(void);
 extern void usbif_host_midi_close_for_host_stop(void);
 extern void usbif_msc_close_for_host_stop(void);
+extern void usbif_host_uac_close_for_host_stop(void);
 
 static void usbif_host_on_dev_gone(usb_device_handle_t hdl) {
     usbif_cdc_on_dev_gone(hdl);
@@ -420,6 +421,8 @@ static void usbif_host_task(void *arg) {
             usbif_host_midi_close_for_host_stop();
             printf("usbif_host: closing msc\n");
             usbif_msc_close_for_host_stop();
+            printf("usbif_host: closing uac\n");
+            usbif_host_uac_close_for_host_stop();
             printf("usbif_host: device_close\n");
             usb_host_device_close(usbif_host_client, usbif_host_devs[i].hdl);
             printf("usbif_host: device_close returned\n");

@@ -81,6 +81,14 @@ extern int usbif_msc_read_block(uint32_t lba, uint8_t *out, size_t max);
 extern int usbif_msc_write_block(uint32_t lba, const uint8_t *data, size_t len);
 extern int usbif_msc_provoke_error(void);
 extern int usbif_host_desc_get(uint32_t dev_id, const uint8_t **out, uint16_t *len);
+extern int usbif_host_uac_open(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
+    uint16_t mps, uint32_t rate);
+extern int usbif_host_uac_read(uint8_t *out, size_t max);
+extern int usbif_host_uac_write(const uint8_t *data, size_t len);
+extern int usbif_host_uac_queued(void);
+extern void usbif_host_uac_stats(uint32_t *packets, uint32_t *bytes, uint32_t *dropped,
+    uint32_t *starved, uint32_t *errors);
+extern void usbif_host_uac_close(void);
 extern int usbif_host_midi_open(uint32_t dev_id);
 extern int usbif_host_midi_read(uint8_t *out, size_t max);
 extern int usbif_host_midi_write(const uint8_t *data, size_t len);
@@ -736,6 +744,107 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_msc_provoke_obj, usbif_host_msc_prov
 // settings, endpoints, and the class-specific descriptors that carry audio
 // formats and video frame tables. Returned whole so the parsing happens in
 // Python, where a wrong guess costs a re-run rather than a reflash.
+// --- UAC host ---------------------------------------------------------
+// The stream to open is chosen in Python by usbif.uac, which reads the whole
+// descriptor and picks an alternate setting; these arguments are that answer.
+// Deliberately not rediscovered here: a UAC device can offer two dozen
+// formats, and choosing among them is configuration, not byte movement.
+static mp_obj_t usbif_host_uac_open_py(size_t n_args, const mp_obj_t *args) {
+    #if USBIF_HAVE_HOST
+    int rc = usbif_host_uac_open(
+        (uint32_t)mp_obj_get_int(args[0]),
+        (uint8_t)mp_obj_get_int(args[1]),
+        (uint8_t)mp_obj_get_int(args[2]),
+        (uint8_t)mp_obj_get_int(args[3]),
+        (uint16_t)mp_obj_get_int(args[4]),
+        n_args > 5 ? (uint32_t)mp_obj_get_int(args[5]) : 0);
+    if (rc != 0) {
+        // Carry the driver's own code: -1 already open, -2 bad packet size,
+        // -3 no such device, -4 alt 0 carries no endpoint, -5 claim refused,
+        // -6 transfer alloc failed, -7 nothing submitted.
+        mp_raise_msg_varg(&mp_type_OSError,
+            MP_ERROR_TEXT("host_uac_open failed (%d)"), rc);
+    }
+    return mp_const_none;
+    #else
+    (void)n_args; (void)args;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_host_uac_open_obj, 5, 6, usbif_host_uac_open_py);
+
+static mp_obj_t usbif_host_uac_read_py(mp_obj_t buf_in) {
+    #if USBIF_HAVE_HOST
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_WRITE);
+    int n = usbif_host_uac_read((uint8_t *)buf.buf, buf.len);
+    if (n < 0) {
+        mp_raise_OSError(MP_EIO);
+    }
+    return MP_OBJ_NEW_SMALL_INT(n);
+    #else
+    (void)buf_in;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(usbif_host_uac_read_obj, usbif_host_uac_read_py);
+
+static mp_obj_t usbif_host_uac_write_py(mp_obj_t buf_in) {
+    #if USBIF_HAVE_HOST
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_READ);
+    int n = usbif_host_uac_write((const uint8_t *)buf.buf, buf.len);
+    if (n < 0) {
+        mp_raise_OSError(MP_EIO);
+    }
+    return MP_OBJ_NEW_SMALL_INT(n);
+    #else
+    (void)buf_in;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(usbif_host_uac_write_obj, usbif_host_uac_write_py);
+
+static mp_obj_t usbif_host_uac_queued_py(void) {
+    #if USBIF_HAVE_HOST
+    return MP_OBJ_NEW_SMALL_INT(usbif_host_uac_queued());
+    #else
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uac_queued_obj, usbif_host_uac_queued_py);
+
+// (packets, bytes, dropped, starved, errors). When a stream sounds wrong the
+// first question is whether bytes are being lost and where, and these
+// separate the three answers: the ring overflowed because Python was late
+// (dropped), the ring was empty when the bus asked (starved), or the bus
+// itself reported a bad packet (errors).
+static mp_obj_t usbif_host_uac_stats_py(void) {
+    #if USBIF_HAVE_HOST
+    uint32_t packets = 0, bytes = 0, dropped = 0, starved = 0, errors = 0;
+    usbif_host_uac_stats(&packets, &bytes, &dropped, &starved, &errors);
+    mp_obj_t items[5] = {
+        mp_obj_new_int_from_uint(packets),
+        mp_obj_new_int_from_uint(bytes),
+        mp_obj_new_int_from_uint(dropped),
+        mp_obj_new_int_from_uint(starved),
+        mp_obj_new_int_from_uint(errors),
+    };
+    return mp_obj_new_tuple(5, items);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uac_stats_obj, usbif_host_uac_stats_py);
+
+static mp_obj_t usbif_host_uac_close_py(void) {
+    #if USBIF_HAVE_HOST
+    usbif_host_uac_close();
+    #endif
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uac_close_obj, usbif_host_uac_close_py);
+
 static mp_obj_t usbif_host_desc_py(mp_obj_t dev_id_in) {
     #if USBIF_HAVE_HOST
     const uint8_t *desc = NULL;
@@ -1159,6 +1268,12 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_stop), MP_ROM_PTR(&usbif_host_stop_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_devices), MP_ROM_PTR(&usbif_host_devices_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_desc), MP_ROM_PTR(&usbif_host_desc_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uac_open), MP_ROM_PTR(&usbif_host_uac_open_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uac_read), MP_ROM_PTR(&usbif_host_uac_read_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uac_write), MP_ROM_PTR(&usbif_host_uac_write_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uac_queued), MP_ROM_PTR(&usbif_host_uac_queued_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uac_stats), MP_ROM_PTR(&usbif_host_uac_stats_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uac_close), MP_ROM_PTR(&usbif_host_uac_close_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_drain), MP_ROM_PTR(&usbif_host_drain_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_stats), MP_ROM_PTR(&usbif_host_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_port_cycle), MP_ROM_PTR(&usbif_host_port_cycle_obj) },
