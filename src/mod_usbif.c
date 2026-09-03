@@ -89,6 +89,16 @@ extern int usbif_host_uac_queued(void);
 extern void usbif_host_uac_stats(uint32_t *packets, uint32_t *bytes, uint32_t *dropped,
     uint32_t *starved, uint32_t *errors, uint32_t *empty);
 extern void usbif_host_uac_close(void);
+extern int usbif_host_uvc_negotiate(uint32_t dev_id, uint8_t itf, uint8_t format_index,
+    uint8_t frame_index, uint32_t interval, uint32_t *payload_out, uint32_t *frame_out);
+extern int usbif_host_uvc_open(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
+    uint16_t packet, uint32_t frame_bytes);
+extern int usbif_host_uvc_read_frame(uint8_t *out, size_t max);
+extern int usbif_host_uvc_frame_ready(void);
+extern void usbif_host_uvc_stats(uint32_t *frames, uint32_t *packets, uint32_t *bytes,
+    uint32_t *dropped_full, uint32_t *dropped_torn, uint32_t *dropped_big,
+    uint32_t *errors, uint32_t *empty);
+extern void usbif_host_uvc_close(void);
 extern int usbif_host_midi_open(uint32_t dev_id);
 extern int usbif_host_midi_read(uint8_t *out, size_t max);
 extern int usbif_host_midi_write(const uint8_t *data, size_t len);
@@ -141,14 +151,14 @@ static const qstr usbif_speed_names[] = {
 // pending class drivers; CDC, HID and MSC host drivers now exist (unconditionally,
 // under the same USBIF_HAVE_HOST gate), so an honest answer names those three --
 // MIDI joined them (usbif_host_midi.c) once it became clear nobody upstream
-// supplies one, and UAC joined them with usbif_host_uac.c. UVC still has no
-// host driver, so that bit stays unset regardless of what a caller asks
-// host_start() for -- capabilities() reports what can actually be driven,
-// not what the enumerator can name.
+// supplies one, UAC joined them with usbif_host_uac.c, and UVC with
+// usbif_host_uvc.c. capabilities() reports what can actually be driven, not
+// what the enumerator can name -- so a bit appears here only once a driver
+// behind it exists.
 static uint16_t usbif_supported_classes(void) {
     #if USBIF_HAVE_HOST
     return USBIF_CLASS_CDC | USBIF_CLASS_HID | USBIF_CLASS_MSC | USBIF_CLASS_MIDI
-        | USBIF_CLASS_UAC;
+        | USBIF_CLASS_UAC | USBIF_CLASS_UVC;
     #else
     return 0;
     #endif
@@ -849,6 +859,138 @@ static mp_obj_t usbif_host_uac_close_py(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uac_close_obj, usbif_host_uac_close_py);
 
+// --- UVC host -----------------------------------------------------------
+
+// Negotiate a mode, and return what the device agreed to as
+// (payload_bytes, frame_bytes). Both numbers come from the camera, not from
+// us: payload_bytes selects the alternate setting and frame_bytes sizes the
+// assembly buffers, and a host that guesses either gets torn frames.
+static mp_obj_t usbif_host_uvc_negotiate_py(size_t n_args, const mp_obj_t *args) {
+    #if USBIF_HAVE_HOST
+    uint32_t payload = 0, frame = 0;
+    int rc = usbif_host_uvc_negotiate(
+        (uint32_t)mp_obj_get_int(args[0]),
+        (uint8_t)mp_obj_get_int(args[1]),
+        (uint8_t)mp_obj_get_int(args[2]),
+        (uint8_t)mp_obj_get_int(args[3]),
+        n_args > 4 ? (uint32_t)mp_obj_get_int(args[4]) : 0,
+        &payload, &frame);
+    if (rc != 0) {
+        // -1 no such device, -2 PROBE set refused, -3 PROBE read refused,
+        // -4 COMMIT refused.
+        mp_raise_msg_varg(&mp_type_OSError,
+            MP_ERROR_TEXT("host_uvc_negotiate failed (%d)"), rc);
+    }
+    mp_obj_t items[2] = {
+        mp_obj_new_int_from_uint(payload),
+        mp_obj_new_int_from_uint(frame),
+    };
+    return mp_obj_new_tuple(2, items);
+    #else
+    (void)n_args; (void)args;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_host_uvc_negotiate_obj, 4, 5, usbif_host_uvc_negotiate_py);
+
+static mp_obj_t usbif_host_uvc_open_py(size_t n_args, const mp_obj_t *args) {
+    #if USBIF_HAVE_HOST
+    (void)n_args;
+    int rc = usbif_host_uvc_open(
+        (uint32_t)mp_obj_get_int(args[0]),
+        (uint8_t)mp_obj_get_int(args[1]),
+        (uint8_t)mp_obj_get_int(args[2]),
+        (uint8_t)mp_obj_get_int(args[3]),
+        (uint16_t)mp_obj_get_int(args[4]),
+        (uint32_t)mp_obj_get_int(args[5]));
+    if (rc != 0) {
+        // -1 already open, -2 bad packet size or alt 0, -3 no such device,
+        // -4 frame buffers would not allocate, -5 claim refused,
+        // -6 transfer alloc failed, -7 nothing submitted.
+        mp_raise_msg_varg(&mp_type_OSError,
+            MP_ERROR_TEXT("host_uvc_open failed (%d)"), rc);
+    }
+    return mp_const_none;
+    #else
+    (void)n_args; (void)args;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_host_uvc_open_obj, 6, 6, usbif_host_uvc_open_py);
+
+// One whole frame or nothing. A partial frame is never returned: the caller
+// cannot tell a truncated JPEG from a complete one, so it is not offered.
+// Raises ENOBUFS rather than truncating if the buffer is too small, and
+// leaves the frame in place to be retried.
+static mp_obj_t usbif_host_uvc_read_frame_py(mp_obj_t buf_in) {
+    #if USBIF_HAVE_HOST
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_WRITE);
+    int n = usbif_host_uvc_read_frame((uint8_t *)buf.buf, buf.len);
+    if (n == -2) {
+        mp_raise_OSError(MP_ENOBUFS);
+    }
+    if (n < 0) {
+        mp_raise_OSError(MP_EIO);
+    }
+    return MP_OBJ_NEW_SMALL_INT(n);
+    #else
+    (void)buf_in;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(usbif_host_uvc_read_frame_obj, usbif_host_uvc_read_frame_py);
+
+// Bytes in the waiting frame, or 0. Lets a caller size a buffer before asking
+// for the frame rather than guessing and catching EMSGSIZE.
+static mp_obj_t usbif_host_uvc_frame_ready_py(void) {
+    #if USBIF_HAVE_HOST
+    return MP_OBJ_NEW_SMALL_INT(usbif_host_uvc_frame_ready());
+    #else
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uvc_frame_ready_obj, usbif_host_uvc_frame_ready_py);
+
+// (frames, packets, bytes, dropped_full, dropped_torn, dropped_big, errors,
+// empty). Three separate drop causes because they call for three different
+// fixes: the consumer is too slow (full), the bus lost a packet mid-frame
+// (torn), or the frame buffer was sized smaller than the camera's frames
+// (big) -- which is our mistake, not the bus's, and would otherwise hide
+// inside a single "dropped" number.
+static mp_obj_t usbif_host_uvc_stats_py(void) {
+    #if USBIF_HAVE_HOST
+    uint32_t frames = 0, packets = 0, bytes = 0, full = 0, torn = 0, big = 0;
+    uint32_t errors = 0, empty = 0;
+    usbif_host_uvc_stats(&frames, &packets, &bytes, &full, &torn, &big,
+        &errors, &empty);
+    mp_obj_t items[8] = {
+        mp_obj_new_int_from_uint(frames),
+        mp_obj_new_int_from_uint(packets),
+        mp_obj_new_int_from_uint(bytes),
+        mp_obj_new_int_from_uint(full),
+        mp_obj_new_int_from_uint(torn),
+        mp_obj_new_int_from_uint(big),
+        mp_obj_new_int_from_uint(errors),
+        mp_obj_new_int_from_uint(empty),
+    };
+    return mp_obj_new_tuple(8, items);
+    #else
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uvc_stats_obj, usbif_host_uvc_stats_py);
+
+static mp_obj_t usbif_host_uvc_close_py(void) {
+    #if USBIF_HAVE_HOST
+    usbif_host_uvc_close();
+    return mp_const_none;
+    #else
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uvc_close_obj, usbif_host_uvc_close_py);
+
 static mp_obj_t usbif_host_desc_py(mp_obj_t dev_id_in) {
     #if USBIF_HAVE_HOST
     const uint8_t *desc = NULL;
@@ -1278,6 +1420,12 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_uac_queued), MP_ROM_PTR(&usbif_host_uac_queued_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_stats), MP_ROM_PTR(&usbif_host_uac_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_close), MP_ROM_PTR(&usbif_host_uac_close_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uvc_negotiate), MP_ROM_PTR(&usbif_host_uvc_negotiate_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uvc_open), MP_ROM_PTR(&usbif_host_uvc_open_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uvc_read_frame), MP_ROM_PTR(&usbif_host_uvc_read_frame_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uvc_frame_ready), MP_ROM_PTR(&usbif_host_uvc_frame_ready_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uvc_stats), MP_ROM_PTR(&usbif_host_uvc_stats_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uvc_close), MP_ROM_PTR(&usbif_host_uvc_close_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_drain), MP_ROM_PTR(&usbif_host_drain_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_stats), MP_ROM_PTR(&usbif_host_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_port_cycle), MP_ROM_PTR(&usbif_host_port_cycle_obj) },

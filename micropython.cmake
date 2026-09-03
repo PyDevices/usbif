@@ -21,6 +21,7 @@ target_sources(usermod_usbif INTERFACE
     ${USBIF_SRC_DIR}/usbif_host_msc.c
     ${USBIF_SRC_DIR}/usbif_host_midi.c
     ${USBIF_SRC_DIR}/usbif_host_uac.c
+    ${USBIF_SRC_DIR}/usbif_host_uvc.c
     ${USBIF_SRC_DIR}/usbif_desc.c
     ${USBIF_SRC_DIR}/usbif_hid_dev.c
     ${USBIF_SRC_DIR}/usbif_msc_dev.c
