@@ -651,7 +651,7 @@ class MidiParityMixin:
         # but every backend must accept back what it emitted, or the ids it
         # publishes are decorative.
         for port in self.ports():
-            kind, index = self.backend._split_id(port.id)[0], None
+            kind = self.backend._split_id(port.id)[0]
             self.assertIn(kind, (usbif.IN, usbif.OUT))
 
     def test_a_foreign_or_malformed_id_is_refused(self):

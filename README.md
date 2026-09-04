@@ -78,8 +78,16 @@ Incoming notes are proven too: 989 channel messages read from a keyboard --
 notes with velocity, pitch bend across its full range, several CCs, and
 channel-10 drums -- with zero bytes dropped.
 
-**Not yet working, said precisely:** UVC in either direction; audio as a
-host; and macOS
+**Video and host audio, both directions, proven:** a USB webcam hosted on an
+ESP32-S3 with its picture on the board's own panel (`src/usbif_host_uvc.c`,
+`examples/uvc_display.py`), and the board seen as a webcam by Windows
+(`src/usbif_uvc_dev.c`, `examples/usbif_webcam.py`) -- sourcing real frames
+from a camera where the board has one, colour bars where it does not. Host
+audio plays too: the isochronous stall that blocked it was a
+`pdMS_TO_TICKS()` rounding to zero ticks at `CONFIG_FREERTOS_HZ=100`, so a
+delay that read as 5 ms never yielded at all.
+
+**Not yet working, said precisely:** macOS
 desktop support, which sits at the [community-verified
 tier](https://github.com/PyDevices/.github/blob/main/docs/platform-support-tiers.md):
 no Mac is on this project's bench, `auto.py` returns a null backend there

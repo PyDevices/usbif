@@ -263,7 +263,7 @@
 // "device cannot start".
 #define USBIF_VIDEO_VS_PAYLOAD_LEN                     \
     (TUD_VIDEO_DESC_CS_VS_FMT_UNCOMPR_LEN +            \
-     TUD_VIDEO_DESC_CS_VS_FRM_UNCOMPR_DISC_LEN + 4 +   \
+     TUD_VIDEO_DESC_CS_VS_FRM_UNCOMPR_CONT_LEN +       \
      TUD_VIDEO_DESC_CS_VS_COLOR_MATCHING_LEN)
 
 // The +1s are the variadic tails: one interface number in the VideoControl
@@ -280,6 +280,19 @@
      TUD_VIDEO_DESC_STD_VS_LEN +                       \
      7)
 
+// The frame descriptor is the *continuous* variant, not the discrete one,
+// and that is a correctness fix rather than a preference. TinyUSB's
+// TUD_VIDEO_DESC_CS_VS_FRM_UNCOMPR_DISC computes its length as
+// `_LEN + N*4` -- four bytes per interval -- but emits `__VA_ARGS__` raw,
+// so a 32-bit interval is truncated to a single byte and the descriptor
+// runs three bytes short of what it declares. Everything after it shifts,
+// and Windows rejects the whole configuration with "device cannot start"
+// (problem code 10). Nothing in TinyUSB uses that macro -- its own video
+// examples build descriptors from structs -- so it is effectively
+// untested upstream. The CONT variant expands every field properly and
+// takes no varargs. A single fixed rate is expressed as a degenerate
+// range: min = max = the interval, step 0.
+//
 // Alt 0 carries no endpoint -- the zero-bandwidth setting a host parks on
 // when it is not streaming -- and alt 1 carries the isochronous IN endpoint.
 // That is the same shape usbif.uvc reads when hosting somebody else's
@@ -299,10 +312,12 @@
     /*_ep*/ USBD_EP_VIDEO_IN, 0, /*_termlnk*/ 2, 0, 0, 0, 0),               \
     TUD_VIDEO_DESC_CS_VS_FMT_UNCOMPR(/*_fmtidx*/ 1, /*_numfrmdesc*/ 1,      \
     TUD_VIDEO_GUID_YUY2, USBIF_VIDEO_BITS_PER_PX, /*_frmidx*/ 1, 0, 0, 0, 0), \
-    TUD_VIDEO_DESC_CS_VS_FRM_UNCOMPR_DISC(/*_frmidx*/ 1, 0,                 \
+    TUD_VIDEO_DESC_CS_VS_FRM_UNCOMPR_CONT(/*_frmidx*/ 1, 0,                 \
     USBIF_VIDEO_WIDTH, USBIF_VIDEO_HEIGHT,                                  \
     USBIF_VIDEO_BITRATE, USBIF_VIDEO_BITRATE,                               \
-    USBIF_VIDEO_FRAME_BYTES, USBIF_VIDEO_INTERVAL, USBIF_VIDEO_INTERVAL),   \
+    USBIF_VIDEO_FRAME_BYTES, USBIF_VIDEO_INTERVAL,                          \
+    /*_min*/ USBIF_VIDEO_INTERVAL, /*_max*/ USBIF_VIDEO_INTERVAL,           \
+    /*_step*/ 0),                                                           \
     TUD_VIDEO_DESC_CS_VS_COLOR_MATCHING(1, 1, 4),                           \
     TUD_VIDEO_DESC_STD_VS(USBD_ITF_VIDEO + 1, /*_alt*/ 1, /*_epn*/ 1, 0),   \
     TUD_VIDEO_DESC_EP_ISO(USBD_EP_VIDEO_IN,                                 \

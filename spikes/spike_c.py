@@ -53,7 +53,6 @@ def busy_ms(ms):
 N = 1200
 stamps = array.array("i", [0] * N)
 idx = 0
-sched_fail = 0
 
 
 def _sched_cb(_):
@@ -118,7 +117,7 @@ def run_b(load_ms, label):
         asyncio.run(main())
     except AttributeError:  # no gather on this build
         async def main2():
-            t = asyncio.create_task(_loader(load_ms, stop))
+            asyncio.create_task(_loader(load_ms, stop))
             await _poller(out, 300, stop)
             await asyncio.sleep_ms(5)
         asyncio.run(main2())
@@ -129,7 +128,6 @@ def run_b(load_ms, label):
 
 # ---------------------------------------- C: scheduler burst capacity
 def run_c():
-    global sched_fail
     log("--- C scheduler burst capacity (depth is compile-time)")
     for burst in (4, 8, 16, 32):
         got = 0

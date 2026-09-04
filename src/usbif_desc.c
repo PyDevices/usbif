@@ -193,6 +193,25 @@ static void usbif_fixup_block(uint8_t *p, uint16_t len, int itf_delta, uint16_t 
                             d[8 + i] = (uint8_t)(d[8 + i] + itf_delta);
                         }
                     }
+                } else if (cur_class == TUSB_CLASS_VIDEO && dlen >= 12 && d[2] == 0x01) {
+                    // VideoControl header, the same shape as MIDI 1.0's:
+                    // bInCollection at d[11] followed by the VideoStreaming
+                    // interface numbers it groups. Unconditional here --
+                    // unlike the audio case there is no version of this
+                    // header that omits the collection.
+                    //
+                    // Missing this does not malform the descriptor: every
+                    // length stays right and every standard interface is
+                    // renumbered correctly, so the configuration parses and
+                    // Windows binds usbvideo.sys to it. The driver then
+                    // looks for the streaming interface the header names,
+                    // finds an interface that moved, and the camera fails
+                    // with "device cannot start" (problem code 10) while the
+                    // composite device beside it reports OK.
+                    const uint8_t n = d[11];
+                    for (uint8_t i = 0; i < n && 12u + i < dlen; i++) {
+                        d[12 + i] = (uint8_t)(d[12 + i] + itf_delta);
+                    }
                 }
                 break;
             case TUSB_DESC_ENDPOINT:
