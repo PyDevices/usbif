@@ -1,0 +1,18 @@
+{
+  "urls": [
+    ["usbif/__init__.py", "github:PyDevices/usbif/lib/usbif/__init__.py"],
+    ["usbif/auto.py", "github:PyDevices/usbif/lib/usbif/auto.py"],
+    ["usbif/hid_keyboard.py", "github:PyDevices/usbif/lib/usbif/hid_keyboard.py"],
+    ["usbif/linux_midi.py", "github:PyDevices/usbif/lib/usbif/linux_midi.py"],
+    ["usbif/linux_usb.py", "github:PyDevices/usbif/lib/usbif/linux_usb.py"],
+    ["usbif/native_midi.py", "github:PyDevices/usbif/lib/usbif/native_midi.py"],
+    ["usbif/native_usb.py", "github:PyDevices/usbif/lib/usbif/native_usb.py"],
+    ["usbif/uac.py", "github:PyDevices/usbif/lib/usbif/uac.py"],
+    ["usbif/uac_audio.py", "github:PyDevices/usbif/lib/usbif/uac_audio.py"],
+    ["usbif/uvc.py", "github:PyDevices/usbif/lib/usbif/uvc.py"],
+    ["usbif/win_midi.py", "github:PyDevices/usbif/lib/usbif/win_midi.py"],
+    ["usbif/win_usb.py", "github:PyDevices/usbif/lib/usbif/win_usb.py"]
+  ],
+  "version": "0.1",
+  "notes": "Portable Python API for the usbif native module. The C half comes from the firmware build; this is the half mip installs. Requires the repository to be public before mip can fetch it."
+}
