@@ -261,6 +261,112 @@ class MidiPort:
         self.close()
 
 
+_VOICE_LEN = {0x8: 2, 0x9: 2, 0xA: 2, 0xB: 2, 0xC: 1, 0xD: 1, 0xE: 2}
+# System-common lengths. Realtime (0xF8-0xFF) carries no data and may
+# interleave anywhere, including between another message's data bytes.
+_COMMON_LEN = {0xF1: 1, 0xF2: 2, 0xF3: 1}
+
+
+class MidiParser:
+    """Plain MIDI 1.0 bytes in, complete messages out.
+
+    :class:`MidiPort` hands out a byte stream and says, correctly, that a
+    reader unable to handle running status has a latent bug. This is that
+    reader, so no caller has to write it again -- and five did.
+
+    Feed it whatever a read returned; drain complete messages as
+    ``(status, data)`` pairs, where ``data`` is a tuple of 0-2 bytes. It
+    handles the four things a hand-rolled loop usually gets wrong:
+
+    * **Running status.** A channel-voice status stays armed, so a stream may
+      send ``90 3C 64 3E 64`` for two note-ons. System common clears it, as
+      the spec requires.
+    * **Split reads.** A message spanning two reads is one message, because
+      state lives in the parser rather than in the loop.
+    * **Realtime interleaving.** Clock and transport bytes may appear between
+      any two bytes of another message. They come out in order and disturb
+      nothing.
+    * **System exclusive.** Swallowed to its terminator, and a status byte
+      arriving mid-sysex aborts it rather than corrupting the next message.
+
+    A data byte arriving with no status is counted in :attr:`desync` rather
+    than guessed at. A non-zero count means the stream was joined mid-message
+    or something upstream is dropping bytes, which is worth seeing.
+
+        >>> p = MidiParser()
+        >>> p.feed(b"\x90\x3c\x64\x3e\x64")
+        >>> p.drain()
+        [(144, (60, 100)), (144, (62, 100))]
+    """
+
+    def __init__(self):
+        self.status = 0
+        self.desync = 0
+        self._data = []
+        self._want = 0
+        self._in_sysex = False
+        self._messages = []
+
+    def feed(self, buf, n=None):
+        """Absorb ``n`` bytes of ``buf`` (all of it when ``n`` is None)."""
+        if n is None:
+            n = len(buf)
+        for i in range(n):
+            self._byte(buf[i])
+
+    def drain(self):
+        """Return the messages completed since the last call, and forget them."""
+        out = self._messages
+        self._messages = []
+        return out
+
+    def reset(self):
+        """Drop all parser state, as after a port is reopened."""
+        self.status = 0
+        self._data = []
+        self._want = 0
+        self._in_sysex = False
+        self._messages = []
+
+    def _byte(self, b):
+        if b >= 0xF8:                       # realtime: interleaves, no state
+            self._messages.append((b, ()))
+            return
+        if self._in_sysex:
+            if b == 0xF7:
+                self._in_sysex = False
+                self._messages.append((0xF7, ()))
+            elif b >= 0x80:                 # a status byte aborts sysex
+                self._in_sysex = False
+                self._byte(b)
+            return
+        if b >= 0x80:
+            if b == 0xF0:
+                self._in_sysex = True
+                return
+            high = b >> 4
+            if high == 0xF:
+                self._want = _COMMON_LEN.get(b, 0)
+                self.status = b if self._want else 0
+                self._data = []
+                if not self._want:
+                    self._messages.append((b, ()))
+            else:
+                self.status = b
+                self._want = _VOICE_LEN[high]
+                self._data = []
+            return
+        if not self.status:                 # data with no status: desync
+            self.desync += 1
+            return
+        self._data.append(b)
+        if len(self._data) == self._want:
+            self._messages.append((self.status, tuple(self._data)))
+            self._data = []
+            if self.status >= 0xF0:         # system common does not stay armed
+                self.status = 0
+
+
 class _Role:
     """Shared capability, lifecycle, and event-buffer housekeeping."""
 
@@ -428,6 +534,7 @@ __all__ = (
     "IN",
     "INOUT",
     "MIDI_PORT_FIELDS",
+    "MidiParser",
     "MidiPort",
     "MidiPortInfo",
     "OUT",

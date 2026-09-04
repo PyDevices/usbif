@@ -18,6 +18,7 @@ import display_driver  # noqa: F401 -- wires LVGL flush + input + event_loop
 import lvgl as lv
 
 import _usbif
+import usbif
 
 CHORDS = (
     ("Major", (4, 7)),
@@ -50,7 +51,7 @@ def _rebuild_harmony():
 _rebuild_harmony()
 
 _rx = bytearray(64)
-_parse = {"status": 0, "need": 0, "have": 0, "d0": 0}
+_parser = usbif.MidiParser()
 
 
 def _emit(status, note, vel):
@@ -62,34 +63,21 @@ def _emit(status, note, vel):
 
 
 def _pump(_t):
-    # Runs from LVGL's timer: drain everything waiting, parse with
-    # running-status tolerance, harmonize notes, pass the rest through.
+    # Runs from LVGL's timer: drain everything waiting, harmonize notes, pass
+    # the rest through. usbif.MidiParser owns the wire rules, and it keeps its
+    # state between calls, so a message split across two timer ticks survives.
     while True:
         n = _usbif.midi_read(_rx)
         if n <= 0:
             return
-        for i in range(n):
-            b = _rx[i]
-            if b >= 0xF8:
-                _usbif.midi_write(bytes([b]))
-            elif b >= 0x80:
-                _parse["status"] = 0 if b >= 0xF0 else b
-                _parse["need"] = 1 if 0xC0 <= b <= 0xDF else 2
-                _parse["have"] = 0
-            elif _parse["status"]:
-                if _parse["have"] == 0 and _parse["need"] == 2:
-                    _parse["d0"] = b
-                    _parse["have"] = 1
-                else:
-                    _parse["have"] = 0
-                    st = _parse["status"]
-                    kind = st & 0xF0
-                    if _parse["need"] == 1:
-                        _usbif.midi_write(bytes([st, b]))
-                    elif kind in (0x80, 0x90):
-                        _emit(st, _parse["d0"], b)
-                    else:
-                        _usbif.midi_write(bytes([st, _parse["d0"], b]))
+        _parser.feed(_rx, n)
+        for status, data in _parser.drain():
+            if status >= 0xF8:
+                _usbif.midi_write(bytes([status]))
+            elif (status & 0xF0) in (0x80, 0x90):
+                _emit(status, data[0], data[1])
+            else:
+                _usbif.midi_write(bytes([status]) + bytes(data))
 
 
 def _matrix(parent, options, key, y_ofs, status_lbl):

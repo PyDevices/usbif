@@ -21,6 +21,7 @@ wants recording in docs/phase0-findings.md.
 import time
 
 import _usbif
+import usbif
 
 # Two-note chord sent to the device, to prove the OUT pipe. Middle C and the
 # fifth above it, loud enough to hear on a sound module.
@@ -84,29 +85,20 @@ def main():
         print("no OUT pipe on this device (receive-only):", exc)
 
     buf = bytearray(64)
-    pending = bytearray()
+    # usbif.MidiParser keeps a partial message across reads rather than
+    # guessing at it, and counts any byte it cannot place.
+    parser = usbif.MidiParser()
     t0 = time.ticks_ms()
     while time.ticks_diff(time.ticks_ms(), t0) < 30000:
         n = _usbif.host_midi_read(buf)
         if n:
-            pending += buf[:n]
-            # Parse whole messages out of the stream; leave any partial
-            # tail for the next pass rather than guessing at it.
-            while len(pending) >= 1:
-                status = pending[0]
-                if status < 0x80:
-                    del pending[0]          # stray data byte
-                    continue
+            parser.feed(buf, n)
+            for status, data in parser.drain():
                 if status >= 0xF8:
-                    del pending[0]          # realtime clock/sense: not noise worth printing
-                    continue
-                need = 2 if (status & 0xF0) in (0xC0, 0xD0) else 3
-                if len(pending) < need:
-                    break
-                d1 = pending[1]
-                d2 = pending[2] if need == 3 else 0
+                    continue                # realtime clock/sense: not worth printing
+                d1 = data[0] if data else 0
+                d2 = data[1] if len(data) > 1 else 0
                 print(" ", describe(status, d1, d2))
-                del pending[:need]
         else:
             time.sleep_ms(5)
 
@@ -116,6 +108,8 @@ def main():
     except OSError:
         pass
 
+    if parser.desync:
+        print("desync:", parser.desync, "byte(s) arrived with no status")
     dropped = _usbif.host_midi_dropped()
     if dropped:
         print("rx dropped:", dropped, "bytes (ring overflowed)")

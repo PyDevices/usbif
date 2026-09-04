@@ -88,3 +88,24 @@ correct everywhere: on Linux it exercises the Linux backend against a
 synthetic sysfs tree, and on Windows it exercises `win_usb` against the real
 bus. Both were also run under MicroPython, since `uwin32` has an `ffi` branch
 as well as a `ctypes` one and the two must agree.
+
+## Reading MIDI
+
+`MidiPort` hands you bytes. `MidiParser` turns them into messages, and owns
+the four rules a hand-rolled loop usually misses: running status, a message
+split across two reads, realtime bytes landing mid-message, and system
+exclusive.
+
+```python
+parser = usbif.MidiParser()
+while True:
+    n = port.read(buf)
+    parser.feed(buf, n)
+    for status, data in parser.drain():
+        if (status & 0xF0) == 0x90 and data[1]:
+            print("note on", data[0], "velocity", data[1])
+```
+
+`parser.desync` counts data bytes that arrived with no status. It should be
+zero; anything else means the stream was joined mid-message or bytes are
+being dropped upstream.

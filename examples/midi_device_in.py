@@ -27,88 +27,16 @@
 import time
 
 import _usbif
+import usbif
 
 DURATION_MS = 20000       # how long to listen once the host has mounted us
 MOUNT_TIMEOUT_MS = 10000  # how long to wait for the host to configure us
 BUF = bytearray(256)
 
-# Data bytes carried by each channel-voice status, indexed by high nibble.
-VOICE_LEN = {0x8: 2, 0x9: 2, 0xA: 2, 0xB: 2, 0xC: 1, 0xD: 1, 0xE: 2}
-# System-common lengths; realtime (0xF8-0xFF) is zero and may interleave
-# anywhere, including inside another message's data bytes.
-COMMON_LEN = {0xF1: 1, 0xF2: 2, 0xF3: 1}
-
 NAMES = {
     0x8: "note-off", 0x9: "note-on", 0xA: "aftertouch",
     0xB: "cc", 0xC: "program", 0xD: "pressure", 0xE: "pitch-bend",
 }
-
-
-class Parser:
-    """Plain MIDI 1.0 byte stream in, complete messages out.
-
-    TinyUSB hands us unpacked USB-MIDI events, so every message should
-    arrive whole and running status should never appear. The parser
-    supports it anyway: if the assumption is ever wrong, the evidence
-    should be a correct tally rather than a pile of desync bytes hiding
-    a framing bug.
-    """
-
-    def __init__(self):
-        self.status = 0
-        self.data = []
-        self.want = 0
-        self.in_sysex = False
-        self.desync = 0
-        self.messages = []
-
-    def feed(self, buf, n):
-        for i in range(n):
-            self._byte(buf[i])
-
-    def _byte(self, b):
-        if b >= 0xF8:                      # realtime: interleaves, no state
-            self.messages.append((b, ()))
-            return
-        if self.in_sysex:
-            if b == 0xF7:
-                self.in_sysex = False
-                self.messages.append((0xF7, ()))
-            elif b >= 0x80:                # a status byte aborts sysex
-                self.in_sysex = False
-                self._byte(b)
-            return
-        if b >= 0x80:
-            if b == 0xF0:
-                self.in_sysex = True
-                return
-            high = b >> 4
-            if high == 0xF:
-                self.want = COMMON_LEN.get(b, 0)
-                self.status = b if self.want else 0
-                self.data = []
-                if not self.want:
-                    self.messages.append((b, ()))
-            else:
-                self.status = b
-                self.want = VOICE_LEN[high]
-                self.data = []
-            return
-        if not self.status:                # data with no status: desync
-            self.desync += 1
-            return
-        self.data.append(b)
-        if len(self.data) == self.want:
-            self.messages.append((self.status, tuple(self.data)))
-            self.data = []
-            # Running status: a channel-voice status stays armed.
-            if self.status >= 0xF0:
-                self.status = 0
-
-    def drain(self):
-        out = self.messages
-        self.messages = []
-        return out
 
 
 def wait_for_mount():
@@ -143,7 +71,7 @@ def main():
     notes_off = 0
     bend_lo = 8192
     bend_hi = 8192
-    parser = Parser()
+    parser = usbif.MidiParser()
     total_bytes = 0
 
     try:

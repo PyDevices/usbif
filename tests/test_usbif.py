@@ -362,6 +362,81 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestMidiParser(unittest.TestCase):
+    """The reader MidiPort's contract says every caller needs.
+
+    Each of these was a bug waiting in a hand-rolled loop, and five examples
+    had one before this class existed.
+    """
+
+    def parse(self, *chunks):
+        p = usbif.MidiParser()
+        for chunk in chunks:
+            p.feed(chunk)
+        return p, p.drain()
+
+    def test_a_plain_message(self):
+        _, out = self.parse(b"\x90\x3c\x64")
+        self.assertEqual(out, [(0x90, (0x3C, 0x64))])
+
+    def test_running_status_stays_armed(self):
+        # Two note-ons, one status byte: legal, and common on a 5-pin wire.
+        _, out = self.parse(b"\x90\x3c\x64\x3e\x64")
+        self.assertEqual(out, [(0x90, (0x3C, 0x64)), (0x90, (0x3E, 0x64))])
+
+    def test_a_message_split_across_reads_is_one_message(self):
+        _, out = self.parse(b"\x90\x3c", b"\x64")
+        self.assertEqual(out, [(0x90, (0x3C, 0x64))])
+
+    def test_realtime_interleaves_without_disturbing_anything(self):
+        # Clock may land between a status byte and its data. Both come out.
+        _, out = self.parse(b"\x90\xf8\x3c\xf8\x64")
+        self.assertEqual(out, [(0xF8, ()), (0xF8, ()), (0x90, (0x3C, 0x64))])
+
+    def test_one_data_byte_messages(self):
+        _, out = self.parse(b"\xc0\x05")
+        self.assertEqual(out, [(0xC0, (0x05,))])
+
+    def test_system_common_does_not_stay_armed(self):
+        # Song position is not running-status-able; the bytes after it are
+        # not a second song position, they are a desync.
+        p, out = self.parse(b"\xf2\x00\x10\x3c\x64")
+        self.assertEqual(out, [(0xF2, (0x00, 0x10))])
+        self.assertEqual(p.desync, 2)
+
+    def test_sysex_is_swallowed_and_terminated(self):
+        _, out = self.parse(b"\xf0\x7e\x00\xf7\x90\x40\x7f")
+        self.assertEqual(out, [(0xF7, ()), (0x90, (0x40, 0x7F))])
+
+    def test_a_status_byte_aborts_an_unterminated_sysex(self):
+        _, out = self.parse(b"\xf0\x7e\x00\x90\x40\x7f")
+        self.assertEqual(out, [(0x90, (0x40, 0x7F))])
+
+    def test_data_without_status_is_counted_not_guessed(self):
+        p, out = self.parse(b"\x3c\x64\x90\x3c\x64")
+        self.assertEqual(out, [(0x90, (0x3C, 0x64))])
+        self.assertEqual(p.desync, 2)
+
+    def test_feed_honours_a_length(self):
+        p = usbif.MidiParser()
+        buf = bytearray(b"\x90\x3c\x64\xff\xff")
+        p.feed(buf, 3)
+        self.assertEqual(p.drain(), [(0x90, (0x3C, 0x64))])
+
+    def test_drain_empties(self):
+        p, out = self.parse(b"\x90\x3c\x64")
+        self.assertEqual(out, [(0x90, (0x3C, 0x64))])
+        self.assertEqual(p.drain(), [])
+
+    def test_reset_drops_partial_state(self):
+        p = usbif.MidiParser()
+        p.feed(b"\x90\x3c")
+        p.reset()
+        p.feed(b"\x64")
+        self.assertEqual(p.drain(), [])
+        self.assertEqual(p.desync, 1)
+
+
 class TestMidiBackendSelection(unittest.TestCase):
     """``usbif.auto``'s MIDI half, which must be safe to call anywhere.
 

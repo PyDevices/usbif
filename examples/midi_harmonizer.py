@@ -19,6 +19,7 @@
 import time
 
 import _usbif
+import usbif
 
 # The chord stack, in semitones above each played note. Change these and
 # the board becomes a different instrument: (12,) octaves, (3, 7) minor,
@@ -45,39 +46,20 @@ def harmonize(status, note, vel):
 
 
 def run():
-    # Minimal running-status MIDI parser: hosts may split messages across
-    # reads or omit repeated status bytes; both are normal on a wire.
-    status = 0
-    data = bytearray(2)
-    need = 0
-    have = 0
+    # usbif.MidiParser owns the wire rules -- running status, messages split
+    # across reads, realtime bytes landing mid-message, sysex. This loop only
+    # decides what to do with each complete message.
+    parser = usbif.MidiParser()
     while True:
         n = _usbif.midi_read(_rx)
         if n <= 0:
             time.sleep_ms(2)
             continue
-        for i in range(n):
-            b = _rx[i]
-            if b >= 0xF8:
-                send(bytes([b]))        # real-time: pass through, mid-anything
-            elif b >= 0x80:
-                status = b
-                have = 0
-                need = 1 if 0xC0 <= b <= 0xDF else 2
-                if b >= 0xF0:
-                    status = 0          # system common: swallowed, keeps this small
-            elif status:
-                data[have] = b
-                have += 1
-                if have == need:
-                    have = 0            # running status: stay armed
-                    kind = status & 0xF0
-                    if kind == 0x90 or kind == 0x80:
-                        harmonize(status, data[0], data[1])
-                    elif need == 2:
-                        send(bytes([status, data[0], data[1]]))
-                    else:
-                        send(bytes([status, data[0]]))
-
-
-run()
+        parser.feed(_rx, n)
+        for status, data in parser.drain():
+            if status >= 0xF8:
+                send(bytes([status]))       # realtime: straight back out
+            elif (status & 0xF0) in (0x80, 0x90):
+                harmonize(status, data[0], data[1])
+            else:
+                send(bytes([status]) + bytes(data))
