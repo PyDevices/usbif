@@ -34,11 +34,15 @@ row. Anything smoother is a real resampler, which is a different example.
 
 import time
 
+import appdev
+import board_config
 import micropython
 from board_config import display_drv
 
 import _usbif
 from usbif import uvc
+
+app = appdev.App(board_config)
 
 # The camera's data endpoint is fed one packet per bus frame, so a mode is
 # only reachable if its negotiated payload fits the host's isochronous IN
@@ -164,27 +168,30 @@ def pick_mode(dev_id, formats, alts, max_w, max_h):
     return None
 
 
-def main():
-    dev_id = find_camera()
-    if dev_id is None:
-        print("no UVC camera found on the host port")
-        return
-    print("camera is device", dev_id)
+def _offered(formats):
+    for fmt in formats:
+        print("   offered:", uvc.describe(fmt))
 
+
+dev_id = find_camera()
+picked = None
+if dev_id is None:
+    print("no UVC camera found on the host port")
+else:
+    print("camera is device", dev_id)
     blob = _usbif.host_desc(dev_id)
     formats = uvc.formats(blob)
     alts = uvc.alt_settings(blob)
     if not formats:
         print("camera declares no video formats")
-        return
+    else:
+        picked = pick_mode(dev_id, formats, alts,
+                           display_drv.width, display_drv.height)
+        if picked is None:
+            print("no uncompressed mode fits this host's isochronous IN limit")
+            _offered(formats)
 
-    picked = pick_mode(dev_id, formats, alts,
-                       display_drv.width, display_drv.height)
-    if picked is None:
-        print("no uncompressed mode fits this host's isochronous IN limit")
-        for fmt in formats:
-            print("   offered:", uvc.describe(fmt))
-        return
+if picked is not None:
     fmt, frame, interval, payload, frame_bytes, alt = picked
     print("streaming", uvc.describe(fmt, frame, interval))
     print("payload %d B/frame on alt %d" % (payload, alt.alt))
@@ -218,43 +225,45 @@ def main():
     _usbif.host_uvc_open(dev_id, fmt.interface, alt.alt, alt.endpoint,
                          alt.max_packet, frame_bytes)
     display_drv.fill(0)
-    shown = 0
-    t0 = time.ticks_ms()
-    try:
-        while True:
-            n = _usbif.host_uvc_read_frame(src)
-            if n <= 0:
-                time.sleep_ms(2)
-                continue
-            # A short frame means the camera sent less than a whole picture.
-            # Showing it would tear the bottom of one image across the top of
-            # the next, so skip it and leave the last good frame up.
-            if n < whole_frame:
-                continue
-            for sy in range(frame.height):
-                yuy2_row_to_rgb565(src_mv[sy * src_stride:], band,
-                                   frame.width, scale)
-                for k in range(1, scale):
-                    band_mv[k * band_stride:(k + 1) * band_stride] = \
-                        band_mv[0:band_stride]
-                display_drv.blit_rect(band, x0, y0 + sy * scale, out_w, scale)
-            # Required, not optional: dotclockframebuffer double-buffers, and
-            # FBDisplay leaves needs_refresh False, so nothing else promotes
-            # the back buffer. Without this every blit lands and nothing
-            # appears.
-            display_drv.show()
-            shown += 1
-            if shown % 25 == 0:
-                dt = time.ticks_diff(time.ticks_ms(), t0)
-                print("%d frames, %.1f fps, stats %r"
-                      % (shown, shown * 1000 / dt, _usbif.host_uvc_stats()))
-    except KeyboardInterrupt:
-        print("stopping")
-    finally:
-        _usbif.host_uvc_close()
-        print("final stats (frames,packets,bytes,full,torn,big,errors,empty):",
-              _usbif.host_uvc_stats())
+    _shown = 0
+    _t0 = time.ticks_ms()
 
+    def _tick(_=None):
+        """Blit a frame if one has arrived; cheap when none has.
 
-if __name__ == "__main__":
-    main()
+        Scheduled rather than looped. A ``while True`` here would work and
+        would be wrong: it owns the interpreter, so touch, the REPL and
+        anything else the app is running never get a turn. ``app.every`` is
+        what makes this a program the board runs rather than a program that
+        takes the board over -- the same reason paint.py hands its drawing to
+        the app's event dispatch instead of polling.
+        """
+        global _shown
+        n = _usbif.host_uvc_read_frame(src)
+        if n <= 0:
+            return
+        # A short frame means the camera sent less than a whole picture.
+        # Showing it would tear the bottom of one image across the top of the
+        # next, so skip it and leave the last good frame up.
+        if n < whole_frame:
+            return
+        for sy in range(frame.height):
+            yuy2_row_to_rgb565(src_mv[sy * src_stride:], band,
+                               frame.width, scale)
+            for k in range(1, scale):
+                band_mv[k * band_stride:(k + 1) * band_stride] = \
+                    band_mv[0:band_stride]
+            display_drv.blit_rect(band, x0, y0 + sy * scale, out_w, scale)
+        # dotclockframebuffer double-buffers, so the back buffer is only
+        # promoted by show(). Called here, in the scheduled work, exactly as
+        # paint.py calls it from the handlers the app dispatches.
+        display_drv.show()
+        _shown += 1
+        if _shown % 25 == 0:
+            dt = time.ticks_diff(time.ticks_ms(), _t0)
+            print("%d frames, %.1f fps, stats %r"
+                  % (_shown, _shown * 1000 / dt, _usbif.host_uvc_stats()))
+
+    # 10 ms, matching bouncing_balls. Frames arrive every 200 ms at 5 fps, so
+    # nearly every tick returns immediately.
+    app.every(_tick, period=10, async_=app.timer_async)
