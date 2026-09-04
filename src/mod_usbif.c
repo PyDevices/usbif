@@ -993,6 +993,14 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uvc_close_obj, usbif_host_uvc_close_
 
 // --- UVC device: the board as a webcam ------------------------------------
 
+// Guarded for the same reason every other class-conditional binding here is:
+// usbif_uvc_dev.c is compiled only by the CMake ports, so on a Makefile port
+// (unix, and anything else building through micropython.mk) these symbols do
+// not exist. Referencing them unconditionally linked fine on esp32 and broke
+// the unix aggregator build with five undefined references -- a shape worth
+// remembering, because the port that fails is the one the module is not
+// really "for", and so is the one nobody runs first.
+#if defined(CFG_TUD_VIDEO) && CFG_TUD_VIDEO
 extern int usbif_uvc_dev_streaming(void);
 extern int usbif_uvc_dev_ready(void);
 extern int usbif_uvc_dev_frame_bytes(void);
@@ -1001,12 +1009,14 @@ extern int usbif_uvc_dev_submit(const uint8_t *data, size_t len);
 extern void usbif_uvc_dev_stats(uint32_t *frames, uint32_t *completed,
     uint32_t *refused, uint32_t *streaming);
 extern void usbif_uvc_dev_reset(void);
+#endif
 
 // (width, height, frame_bytes) for the format the descriptor advertises.
 // Fixed at build time, because a UVC device declares its formats in
 // descriptors the host reads once at enumeration -- changing it is a
 // reflash, which is a property of the class and not of this module.
 static mp_obj_t usbif_uvc_dev_format_py(void) {
+    #if defined(CFG_TUD_VIDEO) && CFG_TUD_VIDEO
     int w = 0, h = 0;
     usbif_uvc_dev_size(&w, &h);
     mp_obj_t items[3] = {
@@ -1015,12 +1025,24 @@ static mp_obj_t usbif_uvc_dev_format_py(void) {
         MP_OBJ_NEW_SMALL_INT(usbif_uvc_dev_frame_bytes()),
     };
     return mp_obj_new_tuple(3, items);
+    #else
+    // A firmware built without the video function answers honestly rather
+    // than raising: a caller asking "what can you show?" deserves "nothing",
+    // not an exception to catch.
+    mp_obj_t items[3] = { MP_OBJ_NEW_SMALL_INT(0), MP_OBJ_NEW_SMALL_INT(0),
+                          MP_OBJ_NEW_SMALL_INT(0) };
+    return mp_obj_new_tuple(3, items);
+    #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uvc_dev_format_obj, usbif_uvc_dev_format_py);
 
 // True once the host has opened the stream and committed a format.
 static mp_obj_t usbif_uvc_dev_streaming_py(void) {
+    #if defined(CFG_TUD_VIDEO) && CFG_TUD_VIDEO
     return mp_obj_new_bool(usbif_uvc_dev_streaming());
+    #else
+    return mp_const_false;
+    #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uvc_dev_streaming_obj, usbif_uvc_dev_streaming_py);
 
@@ -1029,7 +1051,11 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uvc_dev_streaming_obj, usbif_uvc_dev_stre
 // last frame has not gone yet" either spins or drops frames, and those want
 // opposite responses.
 static mp_obj_t usbif_uvc_dev_ready_py(void) {
+    #if defined(CFG_TUD_VIDEO) && CFG_TUD_VIDEO
     return mp_obj_new_bool(usbif_uvc_dev_ready());
+    #else
+    return mp_const_false;
+    #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uvc_dev_ready_obj, usbif_uvc_dev_ready_py);
 
@@ -1039,6 +1065,7 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uvc_dev_ready_obj, usbif_uvc_dev_ready_py
 // for its format, and a silently padded one tears in a way that reads as a
 // bus fault rather than a caller mistake.
 static mp_obj_t usbif_uvc_dev_submit_py(mp_obj_t buf_in) {
+    #if defined(CFG_TUD_VIDEO) && CFG_TUD_VIDEO
     mp_buffer_info_t buf;
     mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_READ);
     int n = usbif_uvc_dev_submit((const uint8_t *)buf.buf, buf.len);
@@ -1054,6 +1081,10 @@ static mp_obj_t usbif_uvc_dev_submit_py(mp_obj_t buf_in) {
         mp_raise_OSError(MP_EIO);
     }
     return MP_OBJ_NEW_SMALL_INT(n);
+    #else
+    (void)buf_in;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(usbif_uvc_dev_submit_obj, usbif_uvc_dev_submit_py);
 
@@ -1064,7 +1095,9 @@ static MP_DEFINE_CONST_FUN_OBJ_1(usbif_uvc_dev_submit_obj, usbif_uvc_dev_submit_
 // a different fault from either.
 static mp_obj_t usbif_uvc_dev_stats_py(void) {
     uint32_t frames = 0, completed = 0, refused = 0, streaming = 0;
+    #if defined(CFG_TUD_VIDEO) && CFG_TUD_VIDEO
     usbif_uvc_dev_stats(&frames, &completed, &refused, &streaming);
+    #endif
     mp_obj_t items[4] = {
         mp_obj_new_int_from_uint(frames),
         mp_obj_new_int_from_uint(completed),
@@ -1076,7 +1109,9 @@ static mp_obj_t usbif_uvc_dev_stats_py(void) {
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uvc_dev_stats_obj, usbif_uvc_dev_stats_py);
 
 static mp_obj_t usbif_uvc_dev_reset_py(void) {
+    #if defined(CFG_TUD_VIDEO) && CFG_TUD_VIDEO
     usbif_uvc_dev_reset();
+    #endif
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uvc_dev_reset_obj, usbif_uvc_dev_reset_py);
