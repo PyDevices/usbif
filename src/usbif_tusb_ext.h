@@ -37,6 +37,29 @@
 #define CFG_TUD_HID_EP_BUFSIZE (16)
 #define CFG_TUD_MIDI_RX_BUFSIZE (TUD_OPT_HIGH_SPEED ? 512 : 64)
 #define CFG_TUD_MIDI_TX_BUFSIZE (TUD_OPT_HIGH_SPEED ? 512 : 64)
+// Video as a device: the board *is* the webcam. One VideoControl interface
+// and one VideoStreaming interface, with an isochronous IN endpoint on the
+// streaming interface's alternate setting 1 -- the same shape usbif.uvc
+// reads when hosting somebody else's camera, pointed the other way.
+//
+// The same argument as the audio function applies with more force: nothing
+// declared through machine.USBDevice can service an isochronous endpoint, so
+// the video interfaces are numbered below USBD_ITF_BUILTIN_MAX to route them
+// to TinyUSB's videod_open() rather than to MicroPython's runtime driver.
+#ifndef USBIF_EXT_VIDEO
+#define USBIF_EXT_VIDEO (1)
+#endif
+#define CFG_TUD_VIDEO (USBIF_EXT_VIDEO)
+#define CFG_TUD_VIDEO_STREAMING (USBIF_EXT_VIDEO)
+// Isochronous, not bulk. Bulk streaming is simpler and is what several
+// examples default to, but it competes for bandwidth rather than reserving
+// it, and a webcam that drops frames under load is a worse demonstration
+// than one that reserves what it needs.
+#define CFG_TUD_VIDEO_STREAMING_BULK (0)
+// One packet per (micro)frame. 512 is inside the full-speed isochronous
+// limit of 1023 and a natural high-speed size, so the same descriptor works
+// on the S3 and the P4.
+#define CFG_TUD_VIDEO_STREAMING_EP_BUFSIZE (512)
 
 // --- Interface, endpoint and string numbering.
 //
@@ -76,13 +99,19 @@
 #define USBIF_EPNUM_HID (USBIF_EPNUM_MIDI + 1)
 #define USBD_EP_HID_IN (0x80 | USBIF_EPNUM_HID)
 
+// Video last: two interfaces (VideoControl, VideoStreaming) and one
+// isochronous IN endpoint.
+#define USBD_ITF_VIDEO (USBD_ITF_HID + 1)
+#define USBIF_EPNUM_VIDEO (USBIF_EPNUM_HID + 1)
+#define USBD_EP_VIDEO_IN (0x80 | USBIF_EPNUM_VIDEO)
+
 // The audio function occupies two interfaces (AudioControl and
 // AudioStreaming) and MIDI two more, which the bounds below must cover so
 // runtime_dev_open keeps declining everything the built-in descriptor owns.
 #undef USBD_ITF_BUILTIN_MAX
-#define USBD_ITF_BUILTIN_MAX (USBD_ITF_HID + 1)
+#define USBD_ITF_BUILTIN_MAX (USBD_ITF_VIDEO + 2)
 #undef USBD_EP_BUILTIN_MAX
-#define USBD_EP_BUILTIN_MAX (USBIF_EPNUM_HID + 1)
+#define USBD_EP_BUILTIN_MAX (USBIF_EPNUM_VIDEO + 1)
 
 // --- Audio function sizing, following TinyUSB's own uac2_speaker_fb example.
 //
@@ -212,6 +241,73 @@
     (sizeof((uint8_t[]){ TUD_HID_REPORT_DESC_KEYBOARD(HID_REPORT_ID(1)), \
                          TUD_HID_REPORT_DESC_MOUSE(HID_REPORT_ID(2)) }))
 
+// --- Video function: the board *is* the webcam.
+//
+// 160x120 YUY2 at 10 fps for the first working version. Uncompressed and
+// small on purpose: it needs no encoder anywhere, every host has a YUY2
+// path, and 38400 bytes a frame at 10 fps is 384 kB/s -- comfortable inside
+// a full-speed isochronous budget, so the same descriptor works on the S3
+// and the P4. Larger frames and MJPEG are a descriptor change once a real
+// sensor is feeding this rather than a generated pattern.
+#define USBIF_VIDEO_WIDTH       (160)
+#define USBIF_VIDEO_HEIGHT      (120)
+#define USBIF_VIDEO_BITS_PER_PX (16)
+#define USBIF_VIDEO_FRAME_BYTES (USBIF_VIDEO_WIDTH * USBIF_VIDEO_HEIGHT * 2)
+// Frame interval in 100 ns units, which is how UVC counts everywhere.
+#define USBIF_VIDEO_INTERVAL    (1000000)
+#define USBIF_VIDEO_BITRATE     (USBIF_VIDEO_FRAME_BYTES * 8 * 10)
+
+// The class-specific descriptors the VideoStreaming input header must
+// account for. Kept as its own name because the header carries the total as
+// a field, and a mismatch there is the kind of error a host reports only as
+// "device cannot start".
+#define USBIF_VIDEO_VS_PAYLOAD_LEN                     \
+    (TUD_VIDEO_DESC_CS_VS_FMT_UNCOMPR_LEN +            \
+     TUD_VIDEO_DESC_CS_VS_FRM_UNCOMPR_DISC_LEN + 4 +   \
+     TUD_VIDEO_DESC_CS_VS_COLOR_MATCHING_LEN)
+
+// The +1s are the variadic tails: one interface number in the VideoControl
+// collection, and one control byte per format in the input header.
+#define USBIF_VIDEO_DESC_LEN                           \
+    (TUD_VIDEO_DESC_IAD_LEN +                          \
+     TUD_VIDEO_DESC_STD_VC_LEN +                       \
+     TUD_VIDEO_DESC_CS_VC_LEN + 1 +                    \
+     TUD_VIDEO_DESC_CAMERA_TERM_LEN +                  \
+     TUD_VIDEO_DESC_OUTPUT_TERM_LEN +                  \
+     TUD_VIDEO_DESC_STD_VS_LEN +                       \
+     TUD_VIDEO_DESC_CS_VS_IN_LEN + 1 +                 \
+     USBIF_VIDEO_VS_PAYLOAD_LEN +                      \
+     TUD_VIDEO_DESC_STD_VS_LEN +                       \
+     7)
+
+// Alt 0 carries no endpoint -- the zero-bandwidth setting a host parks on
+// when it is not streaming -- and alt 1 carries the isochronous IN endpoint.
+// That is the same shape usbif.uvc reads when hosting somebody else's
+// camera, which is a useful thing to have proven from both ends.
+#define USBIF_VIDEO_DESCRIPTOR                                              \
+    TUD_VIDEO_DESC_IAD(USBD_ITF_VIDEO, 2, 0),                               \
+    TUD_VIDEO_DESC_STD_VC(USBD_ITF_VIDEO, 0, 0),                            \
+    TUD_VIDEO_DESC_CS_VC(0x0150,                                            \
+    /*_totallen*/ TUD_VIDEO_DESC_CAMERA_TERM_LEN                            \
+                  + TUD_VIDEO_DESC_OUTPUT_TERM_LEN,                         \
+    /*_clkfreq*/ 27000000, (USBD_ITF_VIDEO + 1)),                           \
+    TUD_VIDEO_DESC_CAMERA_TERM(/*_tid*/ 1, 0, 0, 0, 0, 0, 0),               \
+    TUD_VIDEO_DESC_OUTPUT_TERM(/*_tid*/ 2, VIDEO_TT_STREAMING, 0,           \
+    /*_srcid*/ 1, 0),                                                       \
+    TUD_VIDEO_DESC_STD_VS(USBD_ITF_VIDEO + 1, /*_alt*/ 0, /*_epn*/ 0, 0),   \
+    TUD_VIDEO_DESC_CS_VS_INPUT(/*_numfmt*/ 1, USBIF_VIDEO_VS_PAYLOAD_LEN,   \
+    /*_ep*/ USBD_EP_VIDEO_IN, 0, /*_termlnk*/ 2, 0, 0, 0, 0),               \
+    TUD_VIDEO_DESC_CS_VS_FMT_UNCOMPR(/*_fmtidx*/ 1, /*_numfrmdesc*/ 1,      \
+    TUD_VIDEO_GUID_YUY2, USBIF_VIDEO_BITS_PER_PX, /*_frmidx*/ 1, 0, 0, 0, 0), \
+    TUD_VIDEO_DESC_CS_VS_FRM_UNCOMPR_DISC(/*_frmidx*/ 1, 0,                 \
+    USBIF_VIDEO_WIDTH, USBIF_VIDEO_HEIGHT,                                  \
+    USBIF_VIDEO_BITRATE, USBIF_VIDEO_BITRATE,                               \
+    USBIF_VIDEO_FRAME_BYTES, USBIF_VIDEO_INTERVAL, USBIF_VIDEO_INTERVAL),   \
+    TUD_VIDEO_DESC_CS_VS_COLOR_MATCHING(1, 1, 4),                           \
+    TUD_VIDEO_DESC_STD_VS(USBD_ITF_VIDEO + 1, /*_alt*/ 1, /*_epn*/ 1, 0),   \
+    TUD_VIDEO_DESC_EP_ISO(USBD_EP_VIDEO_IN,                                 \
+    CFG_TUD_VIDEO_STREAMING_EP_BUFSIZE, 1)
+
 #define USBIF_MIDI_IAD_LEN (8)
 #define USBIF_MIDI_IAD \
     8, TUSB_DESC_INTERFACE_ASSOCIATION, USBD_ITF_MIDI, 2, \
@@ -219,9 +315,9 @@
     AUDIO_FUNC_PROTOCOL_CODE_UNDEF, 0,
 
 #if USBIF_EXT_AUDIO
-#define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_AUDIO_SPEAKER_STEREO_FB_DESC_LEN + USBIF_MIDI_IAD_LEN + TUD_MIDI_DESC_LEN + TUD_HID_DESC_LEN)
+#define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_AUDIO_SPEAKER_STEREO_FB_DESC_LEN + USBIF_MIDI_IAD_LEN + TUD_MIDI_DESC_LEN + TUD_HID_DESC_LEN + USBIF_VIDEO_DESC_LEN)
 #else
-#define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_MIDI_IAD_LEN + TUD_MIDI_DESC_LEN + TUD_HID_DESC_LEN)
+#define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_MIDI_IAD_LEN + TUD_MIDI_DESC_LEN + TUD_HID_DESC_LEN + USBIF_VIDEO_DESC_LEN)
 #endif
 // High speed counts in 125 us microframes, so bInterval 4 gives the 1 ms
 // feedback refresh the class expects; full speed counts in 1 ms frames, where
@@ -244,7 +340,8 @@
     /*_report_desc_len*/ USBIF_HID_REPORT_DESC_LEN,    \
     /*_epin*/ USBD_EP_HID_IN,                          \
     /*_epsize*/ CFG_TUD_HID_EP_BUFSIZE,                \
-    /*_ep_interval*/ 10),
+    /*_ep_interval*/ 10),                              \
+    USBIF_VIDEO_DESCRIPTOR,
 #else
 #define MICROPY_HW_USB_EXT_DESC_CFG                    \
     USBIF_AUDIO_SPEAKER_STEREO_FB_DESCRIPTOR(          \
@@ -270,7 +367,8 @@
     /*_report_desc_len*/ USBIF_HID_REPORT_DESC_LEN,    \
     /*_epin*/ USBD_EP_HID_IN,                          \
     /*_epsize*/ CFG_TUD_HID_EP_BUFSIZE,                \
-    /*_ep_interval*/ 10),
+    /*_ep_interval*/ 10),                              \
+    USBIF_VIDEO_DESCRIPTOR,
 #endif // USBIF_EXT_AUDIO
 
 #endif // USBIF_TUSB_EXT_H

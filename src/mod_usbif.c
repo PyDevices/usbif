@@ -991,6 +991,96 @@ static mp_obj_t usbif_host_uvc_close_py(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uvc_close_obj, usbif_host_uvc_close_py);
 
+// --- UVC device: the board as a webcam ------------------------------------
+
+extern int usbif_uvc_dev_streaming(void);
+extern int usbif_uvc_dev_ready(void);
+extern int usbif_uvc_dev_frame_bytes(void);
+extern void usbif_uvc_dev_size(int *width, int *height);
+extern int usbif_uvc_dev_submit(const uint8_t *data, size_t len);
+extern void usbif_uvc_dev_stats(uint32_t *frames, uint32_t *completed,
+    uint32_t *refused, uint32_t *streaming);
+extern void usbif_uvc_dev_reset(void);
+
+// (width, height, frame_bytes) for the format the descriptor advertises.
+// Fixed at build time, because a UVC device declares its formats in
+// descriptors the host reads once at enumeration -- changing it is a
+// reflash, which is a property of the class and not of this module.
+static mp_obj_t usbif_uvc_dev_format_py(void) {
+    int w = 0, h = 0;
+    usbif_uvc_dev_size(&w, &h);
+    mp_obj_t items[3] = {
+        MP_OBJ_NEW_SMALL_INT(w),
+        MP_OBJ_NEW_SMALL_INT(h),
+        MP_OBJ_NEW_SMALL_INT(usbif_uvc_dev_frame_bytes()),
+    };
+    return mp_obj_new_tuple(3, items);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uvc_dev_format_obj, usbif_uvc_dev_format_py);
+
+// True once the host has opened the stream and committed a format.
+static mp_obj_t usbif_uvc_dev_streaming_py(void) {
+    return mp_obj_new_bool(usbif_uvc_dev_streaming());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uvc_dev_streaming_obj, usbif_uvc_dev_streaming_py);
+
+// True when a frame may be written. Deliberately distinct from streaming():
+// a caller that cannot tell "nobody is watching" from "watching, but the
+// last frame has not gone yet" either spins or drops frames, and those want
+// opposite responses.
+static mp_obj_t usbif_uvc_dev_ready_py(void) {
+    return mp_obj_new_bool(usbif_uvc_dev_ready());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uvc_dev_ready_obj, usbif_uvc_dev_ready_py);
+
+// Hand one whole frame to the bus. Returns bytes accepted, or 0 when the
+// host is not streaming or the previous frame is still in flight. Raises on
+// a wrong-sized frame rather than padding it: a UVC frame is a fixed size
+// for its format, and a silently padded one tears in a way that reads as a
+// bus fault rather than a caller mistake.
+static mp_obj_t usbif_uvc_dev_submit_py(mp_obj_t buf_in) {
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(buf_in, &buf, MP_BUFFER_READ);
+    int n = usbif_uvc_dev_submit((const uint8_t *)buf.buf, buf.len);
+    if (n == -1) {
+        mp_raise_msg_varg(&mp_type_ValueError,
+            MP_ERROR_TEXT("frame must be exactly %d bytes"),
+            usbif_uvc_dev_frame_bytes());
+    }
+    if (n == -3) {
+        mp_raise_OSError(MP_EOPNOTSUPP);
+    }
+    if (n < 0) {
+        mp_raise_OSError(MP_EIO);
+    }
+    return MP_OBJ_NEW_SMALL_INT(n);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(usbif_uvc_dev_submit_obj, usbif_uvc_dev_submit_py);
+
+// (frames, completed, refused, streaming). frames counts what was handed to
+// the bus and completed what the bus confirmed sent; a gap between them is
+// the host not collecting. refused counts frames offered while the previous
+// one was still going -- a caller running ahead of the frame rate, which is
+// a different fault from either.
+static mp_obj_t usbif_uvc_dev_stats_py(void) {
+    uint32_t frames = 0, completed = 0, refused = 0, streaming = 0;
+    usbif_uvc_dev_stats(&frames, &completed, &refused, &streaming);
+    mp_obj_t items[4] = {
+        mp_obj_new_int_from_uint(frames),
+        mp_obj_new_int_from_uint(completed),
+        mp_obj_new_int_from_uint(refused),
+        mp_obj_new_bool(streaming),
+    };
+    return mp_obj_new_tuple(4, items);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uvc_dev_stats_obj, usbif_uvc_dev_stats_py);
+
+static mp_obj_t usbif_uvc_dev_reset_py(void) {
+    usbif_uvc_dev_reset();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uvc_dev_reset_obj, usbif_uvc_dev_reset_py);
+
 static mp_obj_t usbif_host_desc_py(mp_obj_t dev_id_in) {
     #if USBIF_HAVE_HOST
     const uint8_t *desc = NULL;
@@ -1399,6 +1489,7 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_FN_AUDIO), MP_ROM_INT(4) },
     { MP_ROM_QSTR(MP_QSTR_FN_MIDI), MP_ROM_INT(8) },
     { MP_ROM_QSTR(MP_QSTR_FN_HID), MP_ROM_INT(16) },
+    { MP_ROM_QSTR(MP_QSTR_FN_VIDEO), MP_ROM_INT(32) },
     { MP_ROM_QSTR(MP_QSTR_uac_enable), MP_ROM_PTR(&usbif_uac_enable_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_start), MP_ROM_PTR(&usbif_uac_pump_start_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_stop), MP_ROM_PTR(&usbif_uac_pump_stop_obj) },
@@ -1426,6 +1517,12 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_uvc_frame_ready), MP_ROM_PTR(&usbif_host_uvc_frame_ready_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uvc_stats), MP_ROM_PTR(&usbif_host_uvc_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uvc_close), MP_ROM_PTR(&usbif_host_uvc_close_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uvc_dev_format), MP_ROM_PTR(&usbif_uvc_dev_format_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uvc_dev_streaming), MP_ROM_PTR(&usbif_uvc_dev_streaming_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uvc_dev_ready), MP_ROM_PTR(&usbif_uvc_dev_ready_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uvc_dev_submit), MP_ROM_PTR(&usbif_uvc_dev_submit_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uvc_dev_stats), MP_ROM_PTR(&usbif_uvc_dev_stats_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uvc_dev_reset), MP_ROM_PTR(&usbif_uvc_dev_reset_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_drain), MP_ROM_PTR(&usbif_host_drain_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_stats), MP_ROM_PTR(&usbif_host_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_port_cycle), MP_ROM_PTR(&usbif_host_port_cycle_obj) },

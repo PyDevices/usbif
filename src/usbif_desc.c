@@ -49,6 +49,7 @@
 #define USBIF_FN_AUDIO (1u << 2)
 #define USBIF_FN_MIDI  (1u << 3)
 #define USBIF_FN_HID   (1u << 4)
+#define USBIF_FN_VIDEO (1u << 5)
 
 // Which functions this firmware was built with. A function that is not
 // compiled in can never be advertised, and asking for it is an error rather
@@ -58,7 +59,8 @@
     (CFG_TUD_MSC ? USBIF_FN_MSC : 0) | \
     (USBIF_EXT_AUDIO ? USBIF_FN_AUDIO : 0) | \
     (CFG_TUD_MIDI ? USBIF_FN_MIDI : 0) | \
-    (CFG_TUD_HID ? USBIF_FN_HID : 0))
+    (CFG_TUD_HID ? USBIF_FN_HID : 0) | \
+    (CFG_TUD_VIDEO ? USBIF_FN_VIDEO : 0))
 
 // Where each function's block sits inside the compile-time descriptor, in
 // the order mp_usbd_descriptor.c emits them (CDC, MSC) followed by the
@@ -78,6 +80,8 @@
 #define USBIF_LEN_MIDI  (USBIF_MIDI_IAD_LEN + TUD_MIDI_DESC_LEN)
 #define USBIF_OFF_HID   (USBIF_OFF_MIDI + USBIF_LEN_MIDI)
 #define USBIF_LEN_HID   (CFG_TUD_HID ? TUD_HID_DESC_LEN : 0)
+#define USBIF_OFF_VIDEO (USBIF_OFF_HID + USBIF_LEN_HID)
+#define USBIF_LEN_VIDEO (CFG_TUD_VIDEO ? USBIF_VIDEO_DESC_LEN : 0)
 
 typedef struct {
     uint16_t bit;
@@ -112,6 +116,13 @@ static const usbif_fn_block_t usbif_blocks[] = {
     // HID is a single interface and carries no association of its own, so
     // there is nothing to strip and nothing that requires one.
     { USBIF_FN_HID,   USBIF_OFF_HID,   USBIF_LEN_HID,   1, false, false },
+    // Video spans two interfaces (VideoControl and VideoStreaming) and, like
+    // UAC2, is only legal with an interface association grouping them -- the
+    // host's video driver binds the association, not the interfaces. So it
+    // is required and not strippable, for the same reason the audio block
+    // is: an audio-only costume with its IAD stripped enumerated and then
+    // bound no driver at all.
+    { USBIF_FN_VIDEO, USBIF_OFF_VIDEO, USBIF_LEN_VIDEO, 2, false, true  },
 };
 
 // The advertised set. Empty at boot by design: a board that always
@@ -129,8 +140,8 @@ static uint16_t usbif_fn_enabled = MICROPY_HW_USB_EXT_BOOT_FUNCTIONS;
 // Where each emitted block landed, recorded by the assembler so the
 // validator can check class policy against the bytes rather than
 // re-deriving which function produced which interface.
-static uint16_t usbif_emit_off[5];
-static const usbif_fn_block_t *usbif_emit_blk[5];
+static uint16_t usbif_emit_off[6];
+static const usbif_fn_block_t *usbif_emit_blk[6];
 static uint8_t usbif_emit_n;
 static uint8_t usbif_desc_buf[MP_USBD_BUILTIN_DESC_CFG_LEN];
 static uint8_t usbif_itf_count;
