@@ -1,17 +1,19 @@
-# usbif: play what the host sends over USB Audio out of the board's codec.
+# usbif: Python FIFO pump -- the inspectable path from USB Audio to the codec.
 #
-# The isochronous endpoint is serviced in C on TinyUSB's task; this loop only
-# moves already-buffered blocks from that FIFO to the I2S sink, a soft deadline
-# set by FIFO depth rather than a per-frame one. Measured at 96-99% of the
-# offered stream on an ESP32-P4, which is why the pump has not yet been moved
-# into C -- it turned out not to be the bottleneck.
+# This is NOT the shipping sound card. The production path is the C pump in
+# `soundcard.py` (`_usbif.uac_pump_start`), which moves isochronous bytes
+# without the interpreter. Keep this script for two jobs it still does better
+# than the C pump: watching the FIFO fill from Python (latency tooling such as
+# `midi_latency.py` also depends on the FIFO being readable), and proving the
+# path end to end when you need every byte count in a log file.
 #
-# What *was* the bottleneck: TinyUSB's example sizing for the software FIFO is
-# a multiple of the endpoint packet, and at 24 kHz mono that packet is 8 bytes,
-# giving a 256-byte FIFO -- about 5 ms. Reads averaged 19 bytes, a third of the
-# stream was lost, and a consumer asking for 20 ms blocks got nothing at all
-# because 20 ms never fit. usbif sizes it in milliseconds instead; see
-# USBIF_AUDIO_FIFO_MS in src/usbif_tusb_ext.h.
+# History, kept so the numbers make sense: TinyUSB's example FIFO sizing is a
+# multiple of the endpoint packet; at 24 kHz mono that was ~5 ms and a third
+# of the stream was lost under a Python consumer. usbif sizes the FIFO in
+# milliseconds instead. Measured at 96-99% of the offered stream on an
+# ESP32-P4 with this loop -- which is why the first pass left the pump in
+# Python. The C pump later took over for the flagship; this file stayed as
+# the transparent half.
 import time
 
 import _usbif

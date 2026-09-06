@@ -9,27 +9,21 @@ Run it on a board with a display and a camera on its host port::
 
     mpremote run uvc_display.py
 
-**Why the uncompressed format and not MJPEG.** A webcam offers far better
-resolutions in MJPEG than uncompressed -- on the bench camera, 640x480 against
-176x144 -- so MJPEG is the tempting choice. It needs a JPEG decoder, and there
-is not one reachable from Python in this firmware today. LVGL is compiled in
-and its TJPGD decoder is enabled and registered, but the MicroPython bindings
-expose only the decoder *types*, and the widget route (hand an ``lv.image`` a
-variable ``image_dsc_t``) does not decode -- verified with the signature
-repaired and the binary decoder stood down. Worse for this use, LVGL's
-``is_jpg()`` demands a JFIF header in the first ten bytes and a UVC frame does
-not have one: it opens straight into a quantisation table and carries its APP0
-segment after the Huffman tables.
+**MJPEG when ``jpegio`` is present.** A webcam offers far better resolutions
+in MJPEG than uncompressed -- on the bench camera, 640x480 against 176x144 --
+so MJPEG is preferred when the firmware has ``jpegio`` (displayif). Frames
+arrive as whole JPEGs; ``jpegio.JpegDecoder`` sniffs SOI only, which is what
+UVC needs (a UVC MJPEG frame is not JFIF-first, so LVGL's ``is_jpg()`` rejects
+it). Without ``jpegio`` the example falls back to uncompressed YUY2, converted
+here and blitted to ``display_drv``.
 
-A ``jpegio`` native module is being added for exactly this path. When it
-lands, this example should grow an MJPEG branch and prefer it -- the frames
-are already whole JPEGs, complete with Huffman tables. Until then:
-uncompressed frames, converted here, blitted straight to ``display_drv``. The
-picture is small and the pixels are honest.
-
-**Why it is upscaled by whole numbers.** Nearest-neighbour at an integer
+**Why YUY2 is upscaled by whole numbers.** Nearest-neighbour at an integer
 factor is a few instructions per pixel and needs no line buffer beyond one
 row. Anything smoother is a real resampler, which is a different example.
+
+**Pairing.** A PyDevices board presenting as a webcam (``usbif_webcam.py`` on
+a P4) is a valid camera for this script on an S3, the same way a Logitech is.
+P4 high-speed host is blocked (usbif#3), so the host role here is an S3.
 """
 
 import time
@@ -53,6 +47,13 @@ IN_LIMIT = 600
 
 # 100 ns units, which is how UVC counts frame intervals throughout.
 INTERVALS = (2000000, 1333333, 1000000, 666666, 333333)   # 5, 7.5, 10, 15, 30 fps
+
+try:
+    import jpegio
+    _HAVE_JPEGIO = True
+except ImportError:
+    jpegio = None
+    _HAVE_JPEGIO = False
 
 
 @micropython.viper
@@ -135,25 +136,41 @@ def find_camera(timeout_ms=10000):
     return None
 
 
-def pick_mode(dev_id, formats, alts, max_w, max_h):
-    """Negotiate the largest uncompressed mode the bus can actually carry.
+def pick_mode(dev_id, formats, alts, max_w, max_h, prefer_mjpeg):
+    """Negotiate the largest mode the bus can actually carry.
 
     Two separate gates, and they have to be asked in this order. Whether a
     mode *exists* is in the descriptors; how much bandwidth it costs is not --
     only the camera can say, and it says it by answering PROBE. So each
     candidate is negotiated for real before it is accepted or rejected.
+
+    When ``prefer_mjpeg`` is true, MJPEG modes are tried first; otherwise
+    only uncompressed encodings are considered.
     """
     candidates = []
     for fmt in formats:
-        if fmt.encoding == "mjpeg" or not fmt.frames:
+        is_mjpeg = fmt.encoding == "mjpeg"
+        if prefer_mjpeg:
+            if not is_mjpeg and not fmt.frames:
+                continue
+            if not is_mjpeg:
+                # Prefer MJPEG; keep uncompressed as a fallback pass below.
+                continue
+        else:
+            if is_mjpeg or not fmt.frames:
+                continue
+        if not fmt.frames:
             continue
         for frame in fmt.frames:
             if frame.width > max_w or frame.height > max_h:
                 continue
-            candidates.append((frame.width * frame.height, fmt, frame))
-    candidates.sort(key=lambda c: c[0], reverse=True)
+            # MJPEG first when asked: score by size, then prefer mjpeg in the
+            # sort key so equal sizes still land on the compressed path.
+            rank = 1 if is_mjpeg else 0
+            candidates.append((rank, frame.width * frame.height, fmt, frame))
+    candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
 
-    for _, fmt, frame in candidates:
+    for _, _, fmt, frame in candidates:
         for interval in INTERVALS:
             if frame.intervals and interval not in frame.intervals:
                 continue
@@ -173,22 +190,40 @@ def _offered(formats):
         print("   offered:", uvc.describe(fmt))
 
 
+def _scale_geometry(frame):
+    scale = min(display_drv.width // frame.width,
+                display_drv.height // frame.height) or 1
+    out_w = frame.width * scale
+    out_h = frame.height * scale
+    x0 = (display_drv.width - out_w) // 2
+    y0 = (display_drv.height - out_h) // 2
+    return scale, out_w, out_h, x0, y0
+
+
 dev_id = find_camera()
 picked = None
 if dev_id is None:
     print("no UVC camera found on the host port")
 else:
     print("camera is device", dev_id)
+    if _HAVE_JPEGIO:
+        print("jpegio present -- preferring MJPEG")
+    else:
+        print("jpegio absent -- uncompressed YUY2 only")
     blob = _usbif.host_desc(dev_id)
     formats = uvc.formats(blob)
     alts = uvc.alt_settings(blob)
     if not formats:
         print("camera declares no video formats")
     else:
-        picked = pick_mode(dev_id, formats, alts,
-                           display_drv.width, display_drv.height)
+        if _HAVE_JPEGIO:
+            picked = pick_mode(dev_id, formats, alts,
+                               display_drv.width, display_drv.height, True)
         if picked is None:
-            print("no uncompressed mode fits this host's isochronous IN limit")
+            picked = pick_mode(dev_id, formats, alts,
+                               display_drv.width, display_drv.height, False)
+        if picked is None:
+            print("no mode fits this host's isochronous IN limit")
             _offered(formats)
 
 if picked is not None:
@@ -196,74 +231,108 @@ if picked is not None:
     print("streaming", uvc.describe(fmt, frame, interval))
     print("payload %d B/frame on alt %d" % (payload, alt.alt))
 
-    # Whole-number upscale, centred. A 176x144 frame becomes 528x432 on an
-    # 800x480 panel; a display smaller than the frame falls back to 1:1.
-    scale = min(display_drv.width // frame.width,
-                display_drv.height // frame.height) or 1
-    out_w = frame.width * scale
-    out_h = frame.height * scale
-    x0 = (display_drv.width - out_w) // 2
-    y0 = (display_drv.height - out_h) // 2
+    scale, out_w, out_h, x0, y0 = _scale_geometry(frame)
     print("%dx%d upscaled x%d -> %dx%d at (%d, %d)"
           % (frame.width, frame.height, scale, out_w, out_h, x0, y0))
 
-    # One *band* of `scale` identical rows, reused per source row. Two reasons
-    # it is a band and not a single row. Building the whole scaled frame would
-    # be out_w * out_h * 2 bytes -- close to half a megabyte at 528x432 -- for
-    # no benefit. And blit_rect byteswaps its buffer **in place** when the
-    # panel needs it, so blitting one row buffer `scale` times would swap it
-    # again on every call and leave every repeated row with its colours
-    # inverted. One buffer, one blit, one swap.
-    band_stride = out_w * 2
-    band = bytearray(band_stride * scale)
-    band_mv = memoryview(band)
     src = bytearray(frame_bytes)
-    src_mv = memoryview(src)
-    src_stride = frame.width * 2
-    whole_frame = src_stride * frame.height
-
     _usbif.host_uvc_open(dev_id, fmt.interface, alt.alt, alt.endpoint,
                          alt.max_packet, frame_bytes)
     display_drv.fill(0)
     _shown = 0
     _t0 = time.ticks_ms()
 
-    def _tick(_=None):
-        """Blit a frame if one has arrived; cheap when none has.
+    if fmt.encoding == "mjpeg":
+        decoder = jpegio.JpegDecoder()
+        # Native-order RGB565, tight. Sized for the negotiated frame; a camera
+        # that sends a larger JPEG than it advertised is refused by decode.
+        rgb = bytearray(frame.width * frame.height * 2)
+        # Nearest-neighbour upscale into a band, same reason as the YUY2 path:
+        # blit_rect byteswaps in place, so one band / one blit / one swap.
+        band_stride = out_w * 2
+        band = bytearray(band_stride * scale)
+        band_mv = memoryview(band)
+        rgb_mv = memoryview(rgb)
+        src_stride = frame.width * 2
 
-        Scheduled rather than looped. A ``while True`` here would work and
-        would be wrong: it owns the interpreter, so touch, the REPL and
-        anything else the app is running never get a turn. ``app.every`` is
-        what makes this a program the board runs rather than a program that
-        takes the board over -- the same reason paint.py hands its drawing to
-        the app's event dispatch instead of polling.
-        """
-        global _shown
-        n = _usbif.host_uvc_read_frame(src)
-        if n <= 0:
-            return
-        # A short frame means the camera sent less than a whole picture.
-        # Showing it would tear the bottom of one image across the top of the
-        # next, so skip it and leave the last good frame up.
-        if n < whole_frame:
-            return
-        for sy in range(frame.height):
-            yuy2_row_to_rgb565(src_mv[sy * src_stride:], band,
-                               frame.width, scale)
-            for k in range(1, scale):
-                band_mv[k * band_stride:(k + 1) * band_stride] = \
-                    band_mv[0:band_stride]
-            display_drv.blit_rect(band, x0, y0 + sy * scale, out_w, scale)
-        # dotclockframebuffer double-buffers, so the back buffer is only
-        # promoted by show(). Called here, in the scheduled work, exactly as
-        # paint.py calls it from the handlers the app dispatches.
-        display_drv.show()
-        _shown += 1
-        if _shown % 25 == 0:
-            dt = time.ticks_diff(time.ticks_ms(), _t0)
-            print("%d frames, %.1f fps, stats %r"
-                  % (_shown, _shown * 1000 / dt, _usbif.host_uvc_stats()))
+        def _tick(_=None):
+            global _shown
+            n = _usbif.host_uvc_read_frame(src)
+            if n <= 0:
+                return
+            try:
+                decoder.open(memoryview(src)[:n])
+            except Exception:
+                return
+            if decoder.width != frame.width or decoder.height != frame.height:
+                return
+            try:
+                decoder.decode(rgb, scale=0)
+            except Exception:
+                return
+            # Integer upscale row by row into the band, then blit.
+            for sy in range(frame.height):
+                row = rgb_mv[sy * src_stride:(sy + 1) * src_stride]
+                if scale == 1:
+                    display_drv.blit_rect(row, x0, y0 + sy, out_w, 1)
+                else:
+                    # Expand horizontally into the first band row, then
+                    # replicate vertically.
+                    o = 0
+                    for px in range(0, src_stride, 2):
+                        pix = row[px:px + 2]
+                        for _k in range(scale):
+                            band_mv[o:o + 2] = pix
+                            o += 2
+                    for k in range(1, scale):
+                        band_mv[k * band_stride:(k + 1) * band_stride] = \
+                            band_mv[0:band_stride]
+                    display_drv.blit_rect(band, x0, y0 + sy * scale, out_w, scale)
+            display_drv.show()
+            _shown += 1
+            if _shown % 25 == 0:
+                dt = time.ticks_diff(time.ticks_ms(), _t0)
+                print("%d frames, %.1f fps, stats %r"
+                      % (_shown, _shown * 1000 / dt, _usbif.host_uvc_stats()))
 
-    # 10 ms, matching bouncing_balls. Frames arrive every 200 ms at 5 fps, so
-    # nearly every tick returns immediately.
+    else:
+        # Uncompressed YUY2 path.
+        band_stride = out_w * 2
+        band = bytearray(band_stride * scale)
+        band_mv = memoryview(band)
+        src_mv = memoryview(src)
+        src_stride = frame.width * 2
+        whole_frame = src_stride * frame.height
+
+        def _tick(_=None):
+            """Blit a frame if one has arrived; cheap when none has.
+
+            Scheduled rather than looped. A ``while True`` here would work and
+            would be wrong: it owns the interpreter, so touch, the REPL and
+            anything else the app is running never get a turn.
+            """
+            global _shown
+            n = _usbif.host_uvc_read_frame(src)
+            if n <= 0:
+                return
+            # A short frame means the camera sent less than a whole picture.
+            # Showing it would tear; skip and leave the last good frame up.
+            if n < whole_frame:
+                return
+            for sy in range(frame.height):
+                yuy2_row_to_rgb565(src_mv[sy * src_stride:], band,
+                                   frame.width, scale)
+                for k in range(1, scale):
+                    band_mv[k * band_stride:(k + 1) * band_stride] = \
+                        band_mv[0:band_stride]
+                display_drv.blit_rect(band, x0, y0 + sy * scale, out_w, scale)
+            display_drv.show()
+            _shown += 1
+            if _shown % 25 == 0:
+                dt = time.ticks_diff(time.ticks_ms(), _t0)
+                print("%d frames, %.1f fps, stats %r"
+                      % (_shown, _shown * 1000 / dt, _usbif.host_uvc_stats()))
+
+    # 10 ms. Frames arrive every 200 ms at 5 fps, so nearly every tick returns
+    # immediately.
     app.every(_tick, period=10, async_=app.timer_async)

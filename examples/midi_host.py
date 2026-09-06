@@ -11,11 +11,13 @@ reversed. Both directions use the same plain MIDI byte stream, so code
 that parses or generates MIDI does not care which end it is on -- the
 USB-MIDI 32-bit packet framing lives in C and never reaches Python.
 
-**Status: written against the driver, not yet run against hardware.** The
-driver (`src/usbif_host_midi.c`) is new and compile-verified only; nobody
-upstream ships a MIDI host driver for the IDF, so it is ours. Expect to
-find things. What it does when it meets a real instrument is exactly what
-wants recording in docs/phase0-findings.md.
+**Proven on hardware.** A Donner keyboard delivered 989 channel messages
+(notes with velocity, pitch bend across its range, CCs, channel-10 drums)
+with zero bytes dropped. Host MIDI OUT was closed on a DIN loopback through
+an M-Audio interface: all eight sent messages returned byte-exact, median
+5 ms round trip. Nobody upstream ships an IDF MIDI host driver, so this one
+is ours (`src/usbif_host_midi.c`); the numbers above are why the status line
+no longer says "compile-verified only".
 """
 
 import time
