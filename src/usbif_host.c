@@ -406,15 +406,24 @@ static void usbif_host_task(void *arg) {
         // Levels 1-3: what TinyUSB's own esp32 glue requests for the same
         // controller.
         .intr_flags = ESP_INTR_FLAG_LOWMED,
-        // On dual-controller chips (P4): BIT1 = the HS controller,
-        // explicitly. The header says a map of 0 defaults to the High-Speed
-        // peripheral on HS-capable targets; the code says `map == 0 ? BIT0`
-        // -- the FS controller, whose INT PHY belongs to USB-Serial-JTAG
-        // there, presenting as "selected PHY is in use". On single-
-        // controller chips (S3) BIT1 names hardware that does not exist and
-        // install fails with ESP_ERR_INVALID_ARG, so the default stands.
+        // On dual-controller chips (P4): BIT0 = the HS controller. The
+        // pinned IDF's own mapping (hal/esp32p4/include/hal/usb_dwc_ll.h):
+        //   USB_DWC_LL_GET_HW(num) = (num == 1) ? &USB_DWC_FS : &USB_DWC_HS
+        // so port index 0 is the high-speed controller (UTMI PHY, the one
+        // wired to the connector) and index 1 is the full-speed one (INT
+        // PHY, shared with USB-Serial-JTAG). usb_host.c maps BIT1 to index
+        // 1. This used to say BIT1 "= the HS controller", and the library
+        // dutifully ran a host on the FS controller, whose PHY reaches no
+        // connector on any P4 board here: the port powered up, went to host
+        // mode, and never saw a device (usbif#3). Measured 2026-09-07 on the
+        // Touch-LCD-4B by reading both controllers' GOTGCTL/HPRT after
+        // host_start: FS clocked and powered, HS not even clocked. The
+        // "selected PHY is in use" that steered the earlier choice was the
+        // device-mode PHY still held; usbif_host_start releases it before
+        // this install now (see usb_phy_otg_release above). A map of 0
+        // means BIT0 as well; it is written out so nobody re-reads it.
         #if defined(CONFIG_SOC_USB_OTG_PERIPH_NUM) && CONFIG_SOC_USB_OTG_PERIPH_NUM > 1
-        .peripheral_map = BIT1,
+        .peripheral_map = BIT0,
         #endif
     };
     esp_err_t err = usb_host_install(&config);
