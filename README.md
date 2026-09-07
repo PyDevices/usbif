@@ -217,6 +217,35 @@ mpy-cross sub-make, which then plants its own qstr fragments in your build
 directory and breaks the link. Use `idf.py -B` for an out-of-tree build
 instead, which does not inherit the variable.
 
+## Examples
+
+| File | Role | What it shows |
+|---|---|---|
+| [`soundcard.py`](examples/soundcard.py) | device | Class-compliant UAC sound card (C pump). Pair with `usb_speaker.py` |
+| [`uac_pump.py`](examples/uac_pump.py) | device | Python FIFO pump -- inspectable path, not the shipping card |
+| [`hid_keyboard.py`](examples/hid_keyboard.py) | device | Board types into the host |
+| [`hid_mouse.py`](examples/hid_mouse.py) | device | Board moves the host cursor |
+| [`ram_drive.py`](examples/ram_drive.py) | device | RAM disk via `msc_attach` |
+| [`sd_drive.py`](examples/sd_drive.py) | device | SD card as a USB drive via `msc_attach_blockdev` |
+| [`usbif_webcam.py`](examples/usbif_webcam.py) | device | Board is a UVC webcam (`cameraif` when present) |
+| [`midi_harmonizer.py`](examples/midi_harmonizer.py) | device | MIDI effect: melody in, triads out |
+| [`midi_harmonizer_ui.py`](examples/midi_harmonizer_ui.py) | device | Harmonizer with a touchscreen chord picker |
+| [`midi_device_in.py`](examples/midi_device_in.py) | device | Prove the board receives MIDI from a host |
+| [`midi_latency.py`](examples/midi_latency.py) | device | MIDI-to-audio round-trip timing |
+| [`host_enum.py`](examples/host_enum.py) | host | Attach/detach via the portable API (board or desktop) |
+| [`hid_host.py`](examples/hid_host.py) | host | USB keyboard → PyDevices key events (M1) |
+| [`usb_serial.py`](examples/usb_serial.py) | host | CDC read/write to a USB-serial device |
+| [`usb_speaker.py`](examples/usb_speaker.py) | host | Play through a hosted USB speaker / `soundcard.py` |
+| [`usb_mic.py`](examples/usb_mic.py) | host | Capture from a hosted USB microphone |
+| [`usb_drive_mount.py`](examples/usb_drive_mount.py) | host | Mount a flash drive and list files |
+| [`usb_drive_log.py`](examples/usb_drive_log.py) | host | Append sensor lines to a hosted stick |
+| [`midi_host.py`](examples/midi_host.py) | host | Host a MIDI keyboard; send a chord back |
+| [`uvc_display.py`](examples/uvc_display.py) | host | Hosted webcam on the board's panel (MJPEG via `jpegio` when present) |
+| [`costume_selftest.py`](examples/costume_selftest.py) | — | Validate every costume's descriptors without a host |
+
+Board-to-board pairings, VBUS warnings, and firmware holes (by issue number)
+live in [`examples/README.md`](examples/README.md).
+
 ## Tests
 
 The ring buffer is tested on the host, where a failure is a two-second answer
