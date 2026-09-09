@@ -34,7 +34,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check out the MicroPython version the patches are written against
         run: |
-          git clone --depth 1 --branch v1.28.0 \
+          # Must match the version patches/ is written against. Moved to
+          # v1.29.0 on 2026-09-09 with the workspace pin move: 1.29 restructured
+          # MP_USBD_BUILTIN_DESC_CFG_LEN (an NCM term, TUD_CONFIG_DESC_LEN moved
+          # last) and added an NCM descriptor block, so 0002 was re-derived
+          # against it and no longer applies to v1.28.0.
+          git clone --depth 1 --branch v1.29.0 \
             https://github.com/micropython/micropython.git /tmp/micropython
       - name: Apply, then reverse, the whole queue
         working-directory: /tmp/micropython
