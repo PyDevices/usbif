@@ -67,9 +67,17 @@
 // USBD_ITF_BUILTIN_MAX: a macro expands where it is used, not where it is
 // defined, so a definition in terms of a maximum that this file then raises
 // would silently evaluate against the new value.
+// MicroPython v1.29.0 renamed the built-in MSC endpoint macros:
+// EPNUM_MSC_OUT/EPNUM_MSC_IN became USBD_MSC_EP_OUT/USBD_MSC_EP_IN, and the
+// OUT one is now derived from the IN one rather than written out per target.
+// Accept either spelling so this header builds against both pins.
+#if !defined(USBD_MSC_EP_OUT) && defined(EPNUM_MSC_OUT)
+#define USBD_MSC_EP_OUT EPNUM_MSC_OUT
+#endif
+
 #if CFG_TUD_MSC
 #define USBD_ITF_AUDIO (USBD_ITF_MSC + 1)
-#define USBIF_EPNUM_AUDIO (EPNUM_MSC_OUT + 1)
+#define USBIF_EPNUM_AUDIO (USBD_MSC_EP_OUT + 1)
 #elif CFG_TUD_CDC
 #define USBD_ITF_AUDIO (USBD_ITF_CDC + 2)
 #define USBIF_EPNUM_AUDIO (3)
