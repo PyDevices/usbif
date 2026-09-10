@@ -1,4 +1,4 @@
-# MicroPython CMake glue for usbif (esp32, rp2, …).
+# MicroPython CMake glue for usbif (ESP32-S2/S3 only; see the guard below).
 # For Make-based ports (unix, windows), see micropython.mk in this dir.
 #
 # Point USER_C_MODULES at this repo (or this file) directly, e.g.:
@@ -9,10 +9,15 @@
 set(USBIF_MOD_DIR ${CMAKE_CURRENT_LIST_DIR})
 set(USBIF_SRC_DIR ${USBIF_MOD_DIR}/src)
 
-# usbif is TinyUSB all the way down -- every source below needs it -- and
-# TinyUSB only exists on parts with a USB OTG controller. The ESP32-C6, C3, C61,
-# H2 and the classic ESP32 have USB Serial/JTAG at most, so the component is not
-# in their build and this module cannot be built for them at all.
+# usbif is TinyUSB all the way down -- every source below needs it -- and it has
+# only ever been built for the ESP32-S2 and S3.
+#
+# Other ESP32 parts (C6, C3, C61, H2, classic) have USB Serial/JTAG at most, so
+# the TinyUSB component is absent from their build. rp2 fails differently and
+# more quietly: it HAS TinyUSB, but a usermod there does not get its include
+# path, so every source fails on `tusb.h: No such file or directory`. Wiring
+# that up is plausible work nobody has done -- the host-mode half is S3-specific
+# regardless -- so rp2 is skipped too rather than half-supported.
 #
 # Without this guard the whole firmware fails to configure on those targets:
 # idf_component_get_property() below is a hard CMake error for a component that
@@ -20,10 +25,10 @@ set(USBIF_SRC_DIR ${USBIF_MOD_DIR}/src)
 # the module leaves the rest of the firmware buildable, which is what lets us
 # target chips beyond the S2/S3. MicroPython draws the same line with
 # MICROPY_PY_TINYUSB (ports/esp32/esp32_common.cmake).
-if(ESP_PLATFORM AND NOT (CONFIG_IDF_TARGET_ESP32S2 OR CONFIG_IDF_TARGET_ESP32S3))
+if(NOT (ESP_PLATFORM AND (CONFIG_IDF_TARGET_ESP32S2 OR CONFIG_IDF_TARGET_ESP32S3)))
     message(STATUS
-        "usbif: skipped -- ${IDF_TARGET} has no USB OTG controller, so TinyUSB "
-        "is not available. The firmware builds without the _usbif module.")
+        "usbif: skipped -- builds only on the ESP32-S2 and S3. The firmware "
+        "builds without the _usbif module.")
     return()
 endif()
 
