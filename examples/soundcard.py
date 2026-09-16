@@ -97,6 +97,10 @@ def main():
     kwargs = {"rate": rate, "bits": bits, "channels": channels}
     if mclk is not None and mclk >= 0:
         kwargs["mclk"] = mclk
+        # The board publishes the MCLK ratio its codec is configured against;
+        # the pump used to hard-code 512, which contradicted the board and made
+        # anything above 32 kHz fail outright. See usbif#12.
+        kwargs["mclk_multiple"] = wire.mck_fs
     _usbif.uac_pump_start(bclk, ws, dout, **kwargs)
     print("C pump started: I2S bclk=%d ws=%d dout=%d rate=%d ch=%d codec=%s"
           % (bclk, ws, dout, rate, channels, "up" if powered else "UNTOUCHED"))

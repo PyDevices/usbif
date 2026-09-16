@@ -329,7 +329,7 @@ extern uint32_t usbif_uac_gain(void);
 
 extern void usbif_uac_note_read(void);
 extern int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
-    uint32_t rate, int bits, int channels);
+    uint32_t rate, int bits, int channels, int mclk_multiple);
 extern void usbif_pump_stop(void);
 extern bool usbif_pump_is_running(void);
 extern uint32_t usbif_pump_bytes, usbif_pump_idle, usbif_pump_timeouts, usbif_pump_shed;
@@ -447,7 +447,7 @@ static mp_obj_t usbif_uac_pump_start(size_t n_args, const mp_obj_t *pos_args,
     mp_map_t *kw_args) {
     #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
     enum { ARG_bclk, ARG_ws, ARG_dout, ARG_mclk, ARG_rate, ARG_bits, ARG_channels,
-           ARG_i2s_id };
+           ARG_i2s_id, ARG_mclk_multiple };
     static const mp_arg_t allowed[] = {
         { MP_QSTR_bclk, MP_ARG_REQUIRED | MP_ARG_INT, { .u_int = -1 } },
         { MP_QSTR_ws, MP_ARG_REQUIRED | MP_ARG_INT, { .u_int = -1 } },
@@ -460,6 +460,9 @@ static mp_obj_t usbif_uac_pump_start(size_t n_args, const mp_obj_t *pos_args,
         { MP_QSTR_bits, MP_ARG_KW_ONLY | MP_ARG_INT, { .u_int = 16 } },
         { MP_QSTR_channels, MP_ARG_KW_ONLY | MP_ARG_INT, { .u_int = 1 } },
         { MP_QSTR_i2s_id, MP_ARG_KW_ONLY | MP_ARG_INT, { .u_int = 0 } },
+        // 0 means "the sensible default", which is 256fs -- what the board's
+        // AUDIO_OUT.wire.mck_fs publishes. Pass that rather than assuming.
+        { MP_QSTR_mclk_multiple, MP_ARG_KW_ONLY | MP_ARG_INT, { .u_int = 0 } },
     };
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
     mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
@@ -467,7 +470,7 @@ static mp_obj_t usbif_uac_pump_start(size_t n_args, const mp_obj_t *pos_args,
     int err = usbif_pump_start(args[ARG_i2s_id].u_int, args[ARG_bclk].u_int,
         args[ARG_ws].u_int, args[ARG_dout].u_int, args[ARG_mclk].u_int,
         (uint32_t)args[ARG_rate].u_int, args[ARG_bits].u_int,
-        args[ARG_channels].u_int);
+        args[ARG_channels].u_int, args[ARG_mclk_multiple].u_int);
     if (err != 0) {
         mp_raise_OSError(err);
     }

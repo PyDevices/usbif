@@ -69,6 +69,13 @@ extern uint32_t usbif_uac_gain(void);
 // against what the descriptor advertises.
 static uint8_t usbif_src_channels = 2;
 static uint8_t usbif_decimate = 1;      // take 1 of every N frames
+// How many channels the I2S sink was opened with. The conversion below used
+// to assume 1, because until the audio format contract every board here had a
+// mono sink -- so it downmixed unconditionally and fed one sample per frame
+// into whatever I2S expected. Opened as stereo, that is half the data the
+// hardware wants, and it consumes frames twice as fast: the stream plays an
+// octave up. See PyDevices/usbif#12.
+static uint8_t usbif_sink_channels = 1;
 
 static i2s_chan_handle_t usbif_i2s_tx;
 static TaskHandle_t usbif_pump_task_handle;
@@ -154,12 +161,32 @@ static void usbif_pump_task(void *arg) {
         // next block, which at these block sizes is inaudibly soon. Unity
         // skips the loop entirely when no conversion is needed either.
         const uint32_t gain = usbif_uac_gain();
-        if (usbif_src_channels == 2 || usbif_decimate > 1 || gain != 65536u) {
+        const bool passthrough = (usbif_src_channels == usbif_sink_channels)
+            && (usbif_decimate == 1) && (gain == 65536u);
+        if (!passthrough) {
             const int16_t *in = (const int16_t *)(void *)block;
             int16_t *out = (int16_t *)(void *)block;
             const uint16_t frames = usable / frame_bytes;
             uint16_t kept = 0;
+            // In-place is safe here because the write index never overtakes
+            // the read index: stereo-to-stereo at decimate 1 writes exactly
+            // where it read, and downmixing produces fewer samples than it
+            // consumes. EXPANDING a mono source onto a stereo wire would NOT
+            // be safe in place -- it emits two samples per frame consumed --
+            // which is why pump_start rejects that combination outright
+            // rather than leaving a trap here for whoever makes the USB
+            // descriptor configurable.
             for (uint16_t f = 0; f < frames; f += usbif_decimate) {
+                if (usbif_src_channels == 2 && usbif_sink_channels == 2) {
+                    // Stereo through to a stereo sink: keep both sides. The
+                    // old code averaged here regardless of the sink and fed
+                    // half the samples the hardware was clocking for.
+                    int32_t l = (int32_t)(((int64_t)in[f * 2] * gain) >> 16);
+                    int32_t r = (int32_t)(((int64_t)in[f * 2 + 1] * gain) >> 16);
+                    out[kept++] = (int16_t)l;
+                    out[kept++] = (int16_t)r;
+                    continue;
+                }
                 int32_t sample;
                 if (usbif_src_channels == 2) {
                     // Average rather than take one side: a mono sink fed only
@@ -220,7 +247,7 @@ void usbif_pump_stop(void) {
 // Returns an esp_err_t; the caller raises. Pins and format come from Python
 // because they are board facts, not usbif's to assume.
 int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
-    uint32_t rate, int bits, int channels) {
+    uint32_t rate, int bits, int channels, int mclk_multiple) {
     if (usbif_pump_running) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -241,9 +268,33 @@ int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
     slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
 
     i2s_std_config_t clk_holder_cfg = { .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(rate) };
-    // 512fs: what the ES8311 on this board expects, and what board_peripherals
-    // asked its PWM for. The multiple has to be stated -- the default is 256fs.
-    clk_holder_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_512;
+    // The MCLK multiple comes from the caller, which takes it from the board's
+    // published AUDIO_OUT.wire.mck_fs. It used to be hard-coded to 512 with a
+    // comment claiming that was "what board_peripherals asked its PWM for" --
+    // which stopped being true when the board moved to 256fs, and nothing
+    // noticed because the two never compared notes.
+    //
+    // It also made rates above 32 kHz impossible: 512fs puts MCLK at 22.6 MHz
+    // for 44.1 kHz and 24.6 MHz for 48 kHz, and the P4's I2S PLL rejects both
+    // with ESP_ERR_INVALID_ARG. At 256fs, 48 kHz needs only 12.288 MHz -- the
+    // same clock 24 kHz already ran at successfully. See PyDevices/usbif#12.
+    switch (mclk_multiple) {
+        case 128:
+            clk_holder_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_128;
+            break;
+        case 384:
+            clk_holder_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
+            break;
+        case 512:
+            clk_holder_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_512;
+            break;
+        case 0:
+        case 256:
+            clk_holder_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+            break;
+        default:
+            return ESP_ERR_INVALID_ARG;
+    }
 
     i2s_std_config_t std_cfg = {
         .clk_cfg = clk_holder_cfg.clk_cfg,
@@ -270,7 +321,29 @@ int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
 
     // What the host sends versus what the sink takes.
     usbif_src_channels = (uint8_t)(CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX);
-    usbif_decimate = (uint8_t)(rate ? (CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE / rate) : 1);
+    usbif_sink_channels = (uint8_t)(channels == 2 ? 2 : 1);
+    // Expanding mono to stereo would have to write more samples than it reads,
+    // which the in-place conversion above cannot do. Unreachable while the USB
+    // descriptor is fixed at stereo; refused rather than silently wrong if it
+    // ever is not.
+    if (usbif_src_channels == 1 && usbif_sink_channels == 2) {
+        i2s_channel_disable(usbif_i2s_tx);
+        i2s_del_channel(usbif_i2s_tx);
+        usbif_i2s_tx = NULL;
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    // Integer decimation only: the pump takes 1 frame in N, so the board rate
+    // has to divide the host rate exactly. It did not check, and 32 kHz -- a
+    // rate it otherwise accepts -- computed N=1 by truncation and fed a 48 kHz
+    // stream into a 32 kHz wire, playing about a fifth flat with nothing
+    // reporting a fault. Refuse rather than sound wrong. See usbif#12.
+    if (rate == 0 || (CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE % rate) != 0) {
+        i2s_channel_disable(usbif_i2s_tx);
+        i2s_del_channel(usbif_i2s_tx);
+        usbif_i2s_tx = NULL;
+        return ESP_ERR_INVALID_ARG;
+    }
+    usbif_decimate = (uint8_t)(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE / rate);
     if (usbif_decimate < 1) {
         usbif_decimate = 1;
     }
