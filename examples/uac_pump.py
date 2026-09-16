@@ -18,11 +18,17 @@ import time
 
 import _usbif
 import board_peripherals as bp
-from audiodev.i2s_audio import I2SPCMOutput
 
-# 20 ms at 24 kHz mono 16-bit. Batching matters: at this size one run moved the
+# The board's own default format, from the published capability. This used to
+# read bp._FORMAT -- one of five private names this file reached through,
+# along with _output_stream, _SESSION, _codec_call and _output_power. Every
+# one of them was a promise the board never made, and any of them could be
+# renamed by a board author with no way to know this file existed.
+FORMAT = bp.AUDIO_OUT.default
+
+# 20 ms at the board's rate. Batching matters: at this size one run moved the
 # same audio in 578 reads that an unbatched loop needed 27,560 reads for.
-CHUNK = (bp._FORMAT.rate // 1000) * bp._FORMAT.frame_size * 20
+CHUNK = (FORMAT.rate // 1000) * FORMAT.frame_size * 20
 
 # The host has a volume control (the UAC feature unit) but does not have to use
 # it -- Windows drives its slider in software and leaves ours untouched, so the
@@ -51,17 +57,13 @@ def main(seconds=30, log_path="/uac_pump.txt"):
         log_file.write(s + "\n")
         log_file.flush()
 
-    out = I2SPCMOutput(
-        lambda: bp._output_stream(),
-        bp._FORMAT,
-        session=bp._SESSION,
-        set_hardware_volume=lambda v: bp._codec_call("set_dac_volume", v),
-        set_hardware_mute=lambda v: bp._codec_call("dac_mute", v),
-        # Not optional: this drives the speaker amplifier's control pin and
-        # calls enable_output() on the codec. Without it every byte still
-        # moves and nothing is audible.
-        power=bp._output_power,
-    )
+    # pcm_out is the raw PCM sink: write() bytes, no sample graph, and so no
+    # audioif needed in firmware -- which matters here, because a USB sound
+    # card has no use for a DSP package. The board wires up codec power,
+    # hardware volume and mute behind it; that used to be assembled by hand
+    # from private names, and the amplifier power hookup in particular is not
+    # optional (without it every byte still moves and nothing is audible).
+    out = bp.pcm_out(FORMAT)
     out.open()
     out.mute(False)
 
@@ -69,7 +71,7 @@ def main(seconds=30, log_path="/uac_pump.txt"):
     volume = host_volume_percent(db256, DEFAULT_VOLUME)
     out.set_volume(volume)
     out.mute(muted)
-    log("codec %r, volume %d, host %d/256 dB" % (bp._FORMAT, volume, db256))
+    log("codec %r, volume %d, host %d/256 dB" % (FORMAT, volume, db256))
 
     buf = bytearray(CHUNK)
     view = memoryview(buf)

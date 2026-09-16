@@ -35,77 +35,59 @@ import _usbif
 DEFAULT_VOLUME = 85  # digital gain on this hardware; see phase0 findings
 
 
-def _i2s_pins():
-    """(bclk, ws, dout, mclk) from board_peripherals, or raise usefully."""
-    # Boards publish these under a few historical names; try them in order.
-    for names in (
-        ("I2S_BCLK", "I2S_WS", "I2S_DOUT", "I2S_MCLK"),
-        ("bclk", "ws", "dout", "mclk"),
-        ("BCLK", "WS", "DOUT", "MCLK"),
-    ):
-        vals = []
-        ok = True
-        for n in names:
-            if not hasattr(bp, n):
-                ok = False
-                break
-            vals.append(getattr(bp, n))
-        if ok:
-            return tuple(vals)
-    pins = getattr(bp, "I2S_OUT_PINS", None)
-    if pins is not None and len(pins) >= 3:
-        bclk, ws, dout = pins[0], pins[1], pins[2]
-        mclk = pins[3] if len(pins) > 3 else -1
-        return bclk, ws, dout, mclk
-    raise RuntimeError(
-        "board_peripherals does not publish I2S output pins "
-        "(looked for I2S_BCLK/I2S_WS/I2S_DOUT/I2S_MCLK and I2S_OUT_PINS). "
-        "Pass them to _usbif.uac_pump_start yourself, or extend the board "
-        "package."
-    )
+def _wire():
+    """The board's I2S output wire: port and pin numbers, nothing opened.
+
+    This file is the third kind of audio consumer. It does not want a sample
+    player and it does not even want a PCM sink -- the C FreeRTOS pump owns
+    the I2S channel, so all Python needs to hand over is where the wires go.
+    ``AudioCapability.wire`` exists for exactly this.
+
+    What used to be here: three historical pin-naming conventions tried in
+    turn, then an ``I2S_OUT_PINS`` tuple, then a RuntimeError saying
+    "board_peripherals does not publish I2S output pins". On the ESP32-P4 it
+    reached that error every time, because the pins were private names
+    (``_SCLK``/``_LRCK``/``_DSDIN``) that no contract promised.
+    """
+    wire = getattr(bp.AUDIO_OUT, "wire", None)
+    if wire is None:
+        raise RuntimeError(
+            "this board's AUDIO_OUT capability publishes no I2S wire, so the "
+            "C pump has nothing to open. Boards with a software-only or "
+            "non-I2S audio path cannot host the C sound card."
+        )
+    return wire
 
 
 def _bring_up_codec():
-    """Power the amp and set a sane volume before the pump starts."""
-    # Prefer the board helper that wires power + volume correctly.
-    audio_out = getattr(bp, "audio_out", None)
-    if callable(audio_out):
-        out = audio_out()
-        try:
-            out.open()
-        except Exception:
-            pass
-        try:
-            out.set_volume(DEFAULT_VOLUME)
-            out.mute(False)
-        except Exception:
-            pass
-        return out
-    # Fall back: poke the codec through the private hooks uac_pump.py uses.
-    power = getattr(bp, "_output_power", None)
-    if callable(power):
-        try:
-            power(True)
-        except Exception:
-            pass
-    set_vol = getattr(bp, "_codec_call", None)
-    if callable(set_vol):
-        try:
-            set_vol("set_dac_volume", DEFAULT_VOLUME)
-            set_vol("dac_mute", False)
-        except Exception:
-            pass
-    return None
+    """Power the amp and set a sane volume, WITHOUT opening an I2S stream.
+
+    The ordering here is the whole difficulty. The C pump opens the I2S
+    channel itself, so Python must not: two owners of one peripheral is a
+    silent failure, not an error. But the codec still has to be powered and
+    unmuted first or every byte moves and nothing is audible.
+
+    ``audio_power`` is the board role for exactly that -- analog path on,
+    no stream. A board without one leaves the codec alone and the pump may
+    still be silent; that is reported rather than papered over, because the
+    old code caught every exception here and printed nothing.
+    """
+    power = getattr(bp, "audio_power", None)
+    if not callable(power):
+        print("note: this board publishes no audio_power role; the codec is "
+              "not being brought up, and the pump may run silently")
+        return False
+    power(True, volume=DEFAULT_VOLUME)
+    return True
 
 
 def main():
-    bclk, ws, dout, mclk = _i2s_pins()
-    fmt = getattr(bp, "_FORMAT", None)
-    rate = getattr(fmt, "rate", 24000) if fmt is not None else 24000
-    bits = getattr(fmt, "bits", 16) if fmt is not None else 16
-    channels = getattr(fmt, "channels", 1) if fmt is not None else 1
+    wire = _wire()
+    bclk, ws, dout, mclk = wire.sck, wire.ws, wire.sd, wire.mck
+    fmt = bp.AUDIO_OUT.default
+    rate, bits, channels = fmt.rate, fmt.bits, fmt.channels
 
-    out = _bring_up_codec()
+    powered = _bring_up_codec()
 
     # Costume first so the host sees the sound card before we start the pump.
     # CDC stays so the REPL survives on the same connector.
@@ -116,8 +98,8 @@ def main():
     if mclk is not None and mclk >= 0:
         kwargs["mclk"] = mclk
     _usbif.uac_pump_start(bclk, ws, dout, **kwargs)
-    print("C pump started: I2S bclk=%d ws=%d dout=%d rate=%d ch=%d"
-          % (bclk, ws, dout, rate, channels))
+    print("C pump started: I2S bclk=%d ws=%d dout=%d rate=%d ch=%d codec=%s"
+          % (bclk, ws, dout, rate, channels, "up" if powered else "UNTOUCHED"))
     print("play audio to this board from a PC, or from usb_speaker.py on an S3")
 
     try:
@@ -130,11 +112,10 @@ def main():
         print("stopping")
     finally:
         _usbif.uac_pump_stop()
-        if out is not None:
-            try:
-                out.close()
-            except Exception:
-                pass
+        if powered:
+            # Amp off after the pump releases I2S, not before: dropping the
+            # analog path while DMA is still clocking pops the speaker.
+            bp.audio_power(False)
 
 
 if __name__ == "__main__":
