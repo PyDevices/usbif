@@ -58,7 +58,7 @@ def main(seconds=30, log_path="/uac_pump.txt"):
         log_file.flush()
 
     # pcm_out is the raw PCM sink: write() bytes, no sample graph, and so no
-    # audioif needed in firmware -- which matters here, because a USB sound
+    # audiodsp needed in firmware -- which matters here, because a USB sound
     # card has no use for a DSP package. The board wires up codec power,
     # hardware volume and mute behind it; that used to be assembled by hand
     # from private names, and the amplifier power hookup in particular is not
