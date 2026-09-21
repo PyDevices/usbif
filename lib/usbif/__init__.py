@@ -479,7 +479,10 @@ class Device(_Role):
     # The functions a board can present. Which of them a given firmware can
     # actually offer is reported by ``functions_available()``; what it is
     # presenting right now is ``functions()``.
-    FUNCTIONS = ("cdc", "msc", "uac", "midi", "hid")
+    # Portable names, which are not the C module's: the C constants are
+    # FN_AUDIO and FN_VIDEO, the portable names are "uac" and "uvc" -- matching
+    # the usbif.uvc module and what host_start() already takes.
+    FUNCTIONS = ("cdc", "msc", "uac", "midi", "hid", "uvc")
 
     def _drain(self):
         return ()

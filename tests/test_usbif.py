@@ -15,6 +15,8 @@ the tree between polls, which is exactly what the kernel does to the real one.
 """
 
 import os
+import pathlib
+import re
 import shutil
 import sys
 import tempfile
@@ -24,6 +26,7 @@ import _env  # noqa: F401
 
 import events
 import usbif
+from usbif import native_usb
 from usbif.linux_usb import LinuxHost
 
 
@@ -1646,6 +1649,83 @@ _C920E = bytes.fromhex(
     "09040108010e02000007058105200b0109040109010e02000007058105e00b010904010a010e"
     "020000070581058013010904010b010e02000007058105001401"
 )
+
+
+class TestDeviceFunctionNames(unittest.TestCase):
+    """The costume vocabulary, in all three places it is written down.
+
+    ``FN_VIDEO`` was in the C module and used by examples/usbif_webcam.py, but
+    neither ``Device.FUNCTIONS`` nor ``NativeDevice._BITS`` knew the name, so
+    ``device().functions("cdc", "uvc")`` raised and a webcam costume had to
+    poke ``_usbif`` directly (PyDevices/usbif#8).
+
+    The portable names are deliberately not the C ones -- ``FN_AUDIO`` is
+    ``"uac"`` and ``FN_VIDEO`` is ``"uvc"``, matching the ``usbif.uvc`` module
+    and what ``host_start()`` already takes -- so the mapping is checked, not
+    the spelling.
+    """
+
+    # portable name -> the C constant it fronts
+    EXPECTED = {
+        "cdc": "FN_CDC",
+        "msc": "FN_MSC",
+        "uac": "FN_AUDIO",
+        "midi": "FN_MIDI",
+        "hid": "FN_HID",
+        "uvc": "FN_VIDEO",
+    }
+
+    @staticmethod
+    def _c_function_bits():
+        """FN_* values from the C module's own constant table."""
+        source = (
+            pathlib.Path(__file__).resolve().parents[1] / "src" / "mod_usbif.c"
+        ).read_text()
+        found = {}
+        for match in re.finditer(
+            r"MP_ROM_QSTR\(MP_QSTR_(FN_[A-Z]+)\),\s*MP_ROM_INT\((\d+)\)", source
+        ):
+            found[match.group(1)] = int(match.group(2))
+        return found
+
+    def test_the_two_python_tables_agree(self):
+        self.assertEqual(
+            set(usbif.Device.FUNCTIONS),
+            set(native_usb.NativeDevice._BITS),
+            "Device.FUNCTIONS and NativeDevice._BITS have drifted apart",
+        )
+
+    def test_python_names_cover_every_c_function(self):
+        c_bits = self._c_function_bits()
+        self.assertTrue(c_bits, "no FN_* constants found in src/mod_usbif.c")
+        self.assertEqual(
+            set(c_bits),
+            set(self.EXPECTED.values()),
+            "the C module's FN_* set changed; update EXPECTED and the two "
+            "Python tables with it",
+        )
+
+    def test_each_portable_name_carries_its_c_bit(self):
+        c_bits = self._c_function_bits()
+        for name, constant in self.EXPECTED.items():
+            with self.subTest(function=name):
+                self.assertEqual(
+                    native_usb.NativeDevice._BITS[name],
+                    c_bits[constant],
+                    "%s should be %s" % (name, constant),
+                )
+
+    def test_uvc_is_accepted_by_the_portable_api(self):
+        # The exact call the issue says raised.
+        device = native_usb.NativeDevice.__new__(native_usb.NativeDevice)
+        self.assertEqual(
+            device._names_to_mask(("cdc", "uvc")),
+            1 | 32,
+        )
+        self.assertEqual(
+            device._mask_to_names(1 | 32),
+            frozenset({"cdc", "uvc"}),
+        )
 
 
 class TestUvcDescriptors(unittest.TestCase):
