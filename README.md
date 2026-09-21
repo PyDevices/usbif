@@ -4,9 +4,10 @@ Native USB for MicroPython: a board that a computer sees as a sound card, a
 MIDI instrument or a webcam, and — on the same board — a USB host that a
 keyboard, thumb drive, MIDI controller or camera plugs into.
 
-`usbif` is the third PyDevices `*if` module, after
-[`displayif`](https://github.com/PyDevices/displayif) and
-[`audiodsp`](https://github.com/PyDevices/audiodsp): a native C module with a
+`usbif` is one of the PyDevices `*if` modules, with
+[`displayif`](https://github.com/PyDevices/displayif),
+[`audioif`](https://github.com/PyDevices/audioif) and
+[`cameraif`](https://github.com/PyDevices/cameraif): a native C module with a
 thin, stable Python surface that higher-level packages build on. The portable
 API ships separately, as `lib/usbif` in
 [`pydevices`](https://github.com/PyDevices/pydevices), and is implemented twice
