@@ -49,7 +49,7 @@ Per class, everything hangs off `usbif.host.<class>` and takes a `DeviceInfo.id`
 | hid | auto-routing by default; `hid.raw(id) -> RawHID` with `read()`/`write()`/report descriptors | RawHID is what `uhidapi` also implements on desktop |
 | msc | `msc.mount(id, "/usb")`, `msc.umount(id)`; optional automount policy flag | Exposes a VFS block device; desktop maps to the OS mount point and reports it |
 | cdc | `cdc.open(id, baud=115200, ...) -> stream` | `read`/`write`/`any`; COM ports and termios on desktop |
-| midi | `midi.ports() -> tuple[MidiPort]`; `port.read()` / `port.write(msg)` | Messages in the `audioif`/`micropython-vst3` model; virtual ports appear here on desktop |
+| midi | `midi.ports() -> tuple[MidiPort]`; `port.read()` / `port.write(msg)` | Messages in the `audiodsp`/`micropython-vst3` model; virtual ports appear here on desktop |
 | uac | `uac.devices()` — then selection happens in `audiodev` under shared names | Deliberately not a second audio API |
 | uvc | `uvc.open(id, size=(w, h), format="mjpeg") -> Camera`; `camera.read_into(buf)` | Frames arrive display-pipeline-ready; C owns the isochronous side |
 
@@ -59,7 +59,7 @@ Device-role classes compose with `machine.USBDevice`'s runtime model as addition
 
 ```python
 snd = usbif.device.uac(sample_rate=48000, channels=2, bits=16, mic=False)
-snd.sink          # an audioif-compatible output; audioif plays, C streams
+snd.sink          # an audiodsp-compatible output; audiodsp plays, C streams
 snd.active        # is the host streaming?  (observe, don't pump)
 
 cam = usbif.device.uvc(size=(640, 480), format="mjpeg", source=frame_source)

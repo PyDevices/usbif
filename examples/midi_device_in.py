@@ -5,7 +5,7 @@
 # MIDI OUT), reads a keyboard (host MIDI IN), and drives an instrument
 # (host MIDI OUT). What has never been exercised is the direction a
 # software instrument needs most -- a host sequencer playing *into* the
-# board, so `audioif` can render what a DAW sends it.
+# board, so `audiodsp` can render what a DAW sends it.
 #
 # The board wears a pure-MIDI costume, so on the host it is a MIDI
 # device and nothing else. Anything that can send MIDI drives it: a DAW

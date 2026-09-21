@@ -6,7 +6,7 @@ keyboard, thumb drive, MIDI controller or camera plugs into.
 
 `usbif` is the third PyDevices `*if` module, after
 [`displayif`](https://github.com/PyDevices/displayif) and
-[`audioif`](https://github.com/PyDevices/audioif): a native C module with a
+[`audiodsp`](https://github.com/PyDevices/audiodsp): a native C module with a
 thin, stable Python surface that higher-level packages build on. The portable
 API ships separately, as `lib/usbif` in
 [`pydevices`](https://github.com/PyDevices/pydevices), and is implemented twice
