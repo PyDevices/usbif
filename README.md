@@ -14,8 +14,8 @@ API ships separately, as `lib/usbif` in
 — once by this module and once by desktop backends over OS services. That
 portability covers enumeration, device identity and hot-plug events today, so
 an application that observes devices runs unchanged on a workstation; the
-streaming surfaces (MIDI bytes, the audio pump) are reached through `_usbif`
-directly and have no desktop counterpart yet.
+streaming surfaces (the audio pump, the video endpoint) are methods on the
+object `usbif.auto` hands back, and have no desktop counterpart yet.
 
 ## Status: early development
 
@@ -39,14 +39,14 @@ The board's USB identity is a Python decision, not a build option: every
 function is compiled in, and the application chooses which the host sees.
 
 ```python
-import usbif.auto, _usbif
+import usbif.auto
 
 dev = usbif.auto.device()
 dev.functions("cdc", "uac")      # a console and a sound card
 dev.functions("midi")            # a bare MIDI instrument, interface 0
 dev.functions()                  # -> frozenset({'midi'})
 
-_usbif.uac_pump_start(bclk, ws, dout, rate=24000, bits=16, channels=1)
+dev.uac_pump_start(bclk, ws, dout, rate=24000, bits=16, channels=1)
 ```
 
 Each call re-enumerates -- USB has no way to change identity in place -- and

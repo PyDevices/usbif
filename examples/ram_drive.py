@@ -19,7 +19,7 @@ bytes yourself.
 
 import time
 
-import _usbif
+import usbif.auto
 
 # 128 x 512-byte blocks = 64 KiB. Small enough for SRAM on an S3, large enough
 # that a host will format and mount it without complaining about capacity.
@@ -28,23 +28,24 @@ BLOCK = 512
 
 
 def main():
-    _usbif.msc_detach()
+    dev = usbif.auto.device()
+    dev.msc_detach()
 
     buf = bytearray(BLOCKS * BLOCK)
-    _usbif.msc_attach(buf, True)
+    dev.msc_attach(buf, True)
 
-    _usbif.dev_functions(_usbif.FN_CDC | _usbif.FN_MSC)
-    attached, n_blocks, _ = _usbif.msc_status()
+    dev.functions("cdc", "msc")
+    attached, n_blocks, _ = dev.msc_status()
     print("RAM disk attached:", attached, "blocks:", n_blocks,
           "(%d KiB)" % (n_blocks * BLOCK // 1024))
     print("format it on the host the first time, then copy files")
 
     while True:
         time.sleep_ms(5)
-        _, _, ejected = _usbif.msc_status()
+        _, _, ejected = dev.msc_status()
         if ejected:
             print("host ejected; releasing")
-            _usbif.msc_detach()
+            dev.msc_detach()
             return
 
 

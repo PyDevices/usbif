@@ -1,7 +1,7 @@
 # usbif: Python FIFO pump -- the inspectable path from USB Audio to the codec.
 #
 # This is NOT the shipping sound card. The production path is the C pump in
-# `soundcard.py` (`_usbif.uac_pump_start`), which moves isochronous bytes
+# `soundcard.py` (`dev.uac_pump_start`), which moves isochronous bytes
 # without the interpreter. Keep this script for two jobs it still does better
 # than the C pump: watching the FIFO fill from Python (latency tooling such as
 # `midi_latency.py` also depends on the FIFO being readable), and proving the
@@ -16,8 +16,8 @@
 # the transparent half.
 import time
 
-import _usbif
 import board_peripherals as bp
+import usbif.auto
 
 # The board's own default format, from the published capability. This used to
 # read bp._FORMAT -- one of five private names this file reached through,
@@ -63,11 +63,13 @@ def main(seconds=30, log_path="/uac_pump.txt"):
     # hardware volume and mute behind it; that used to be assembled by hand
     # from private names, and the amplifier power hookup in particular is not
     # optional (without it every byte still moves and nothing is audible).
+    dev = usbif.auto.device()
+
     out = bp.pcm_out(FORMAT)
     out.open()
     out.mute(False)
 
-    muted, db256 = _usbif.uac_volume()
+    muted, db256 = dev.uac_volume()
     volume = host_volume_percent(db256, DEFAULT_VOLUME)
     out.set_volume(volume)
     out.mute(muted)
@@ -75,7 +77,7 @@ def main(seconds=30, log_path="/uac_pump.txt"):
 
     buf = bytearray(CHUNK)
     view = memoryview(buf)
-    avail, read, write = _usbif.uac_available, _usbif.uac_read, out.write
+    avail, read, write = dev.uac_available, dev.uac_read, out.write
     total = reads = 0
     last = (muted, db256)
     t0 = time.ticks_ms()
@@ -88,7 +90,7 @@ def main(seconds=30, log_path="/uac_pump.txt"):
                 total += n
                 reads += 1
                 if reads % 100 == 0:
-                    now = _usbif.uac_volume()
+                    now = dev.uac_volume()
                     if now != last:
                         out.set_volume(host_volume_percent(now[1], DEFAULT_VOLUME))
                         out.mute(now[0])

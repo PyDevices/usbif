@@ -22,8 +22,8 @@ no longer says "compile-verified only".
 
 import time
 
-import _usbif
 import usbif
+import usbif.auto
 
 # Two-note chord sent to the device, to prove the OUT pipe. Middle C and the
 # fifth above it, loud enough to hear on a sound module.
@@ -50,37 +50,40 @@ def describe(status, d1, d2):
 
 
 def main():
-    print("host_start ->", _usbif.host_start(("midi",)))
+    host = usbif.auto.host(classes=("midi",)).start()
+    print("started ->", tuple(sorted(host.started)))
 
     dev = None
     for _ in range(20):
         time.sleep_ms(500)
-        devs = _usbif.host_devices()
+        devs = host.devices()
         if devs:
             dev = devs[0]
             break
 
     if dev is None:
         print("no MIDI device attached")
-        print("stats", _usbif.host_stats())
-        _usbif.host_stop()
+        print("stats", host.stats())
+        host.stop()
         return
 
-    dev_id, vid, pid = dev[0], dev[1], dev[2]
-    print("device {:04x}:{:04x} classes={} speed={}".format(vid, pid, dev[5], dev[6]))
-    if "midi" not in dev[5]:
+    print("device {:04x}:{:04x} classes={} speed={}".format(
+        dev.vid, dev.pid, dev.classes, dev.speed))
+    if "midi" not in dev.classes:
         print("not a MIDI device; nothing to do")
-        _usbif.host_stop()
+        host.stop()
         return
 
-    _usbif.host_midi_open(dev_id)
+    # The hosted device as a MidiPort: the same object the board's own MIDI
+    # function gives, so the parsing and generating below is role-agnostic.
+    port = usbif.auto.open_midi("host:{}".format(dev.id))
     print("opened -- play something (30 s)")
 
     # Send a chord first: on a sound module this is audible proof the OUT
     # pipe works before a single key is pressed.
     try:
-        n = _usbif.host_midi_write(bytes([_NOTE_ON, _CHORD[0], 100,
-                                          _NOTE_ON, _CHORD[1], 100]))
+        n = port.write(bytes([_NOTE_ON, _CHORD[0], 100,
+                              _NOTE_ON, _CHORD[1], 100]))
         print("sent a chord,", n, "bytes accepted")
     except OSError as exc:
         # A keyboard with no OUT pipe is a legitimate device, not a failure.
@@ -92,7 +95,7 @@ def main():
     parser = usbif.MidiParser()
     t0 = time.ticks_ms()
     while time.ticks_diff(time.ticks_ms(), t0) < 30000:
-        n = _usbif.host_midi_read(buf)
+        n = port.read(buf)
         if n:
             parser.feed(buf, n)
             for status, data in parser.drain():
@@ -105,18 +108,23 @@ def main():
             time.sleep_ms(5)
 
     try:
-        _usbif.host_midi_write(bytes([_NOTE_OFF, _CHORD[0], 0,
-                                      _NOTE_OFF, _CHORD[1], 0]))
+        port.write(bytes([_NOTE_OFF, _CHORD[0], 0,
+                          _NOTE_OFF, _CHORD[1], 0]))
     except OSError:
         pass
 
     if parser.desync:
         print("desync:", parser.desync, "byte(s) arrived with no status")
-    dropped = _usbif.host_midi_dropped()
-    if dropped:
-        print("rx dropped:", dropped, "bytes (ring overflowed)")
-    _usbif.host_midi_close()
-    _usbif.host_stop()
+    # (rx_dropped, release_failed), not a single count -- and a 2-tuple is
+    # always truthy, so testing the tuple itself reported a drop on every
+    # clean run.
+    rx_dropped, release_failed = port.dropped()
+    if rx_dropped:
+        print("rx dropped:", rx_dropped, "bytes (ring overflowed)")
+    if release_failed:
+        print("transfer releases failed:", release_failed)
+    port.close()
+    host.stop()
     print("done")
 
 

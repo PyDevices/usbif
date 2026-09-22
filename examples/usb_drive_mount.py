@@ -7,6 +7,8 @@ devices. All that was missing between them is an object with readblocks /
 writeblocks / ioctl -- and the partition offset, since the filesystem does
 not start at LBA 0 on a partitioned stick, which is the detail that makes
 a naive mount fail with a confusing error rather than an obvious one.
+``host.partition()`` is that object; it used to be copy-pasted into this
+file and into ``usb_drive_log.py``, and now lives in ``usbif.native_usb``.
 
 Verified against a commodity PNY 8 GB stick formatted FAT32 on a PC: the
 board listed its directory and read back the text of a file written on
@@ -17,88 +19,40 @@ not WRITE(10), so `writeblocks` raises EROFS rather than quietly doing
 nothing -- a drive that silently discards writes is worse than one that
 refuses them.
 """
-import _usbif
 import os
 import time
 
-
-class USBPartition:
-    """A partition on a hosted MSC device, as a MicroPython block device."""
-
-    def __init__(self, start_lba, num_blocks, block_size):
-        self.start = start_lba
-        self.count = num_blocks
-        self.bs = block_size
-        self._one = bytearray(block_size)
-
-    def readblocks(self, block_num, buf, offset=0):
-        # The extended protocol hands us a buffer that may span several
-        # blocks; the host driver reads one block per call, so loop.
-        want = len(buf)
-        done = 0
-        lba = self.start + block_num
-        if offset:
-            _usbif.host_msc_read(lba, self._one)
-            take = min(want, self.bs - offset)
-            buf[0:take] = self._one[offset:offset + take]
-            done = take
-            lba += 1
-        while done < want:
-            take = min(self.bs, want - done)
-            if take == self.bs:
-                mv = memoryview(buf)[done:done + self.bs]
-                _usbif.host_msc_read(lba, mv)
-            else:
-                _usbif.host_msc_read(lba, self._one)
-                buf[done:done + take] = self._one[0:take]
-            done += take
-            lba += 1
-        return 0
-
-    def writeblocks(self, block_num, buf, offset=0):
-        # The host driver has no WRITE(10) yet: reading proves the
-        # transport, and writing someone's drive is a decision this layer
-        # has not been asked to make. Mount read-only.
-        raise OSError(30)   # EROFS
-
-    def ioctl(self, op, arg):
-        if op == 4:         # block count
-            return self.count
-        if op == 5:         # block size
-            return self.bs
-        if op == 6:         # erase block -- no-op for FAT
-            return 0
-        return 0
+import usbif.auto
 
 
 def main():
-    print("host_start ->", _usbif.host_start(("msc",)))
+    host = usbif.auto.host(classes=("msc",)).start()
+    print("started ->", tuple(sorted(host.started)))
 
     dev = None
     for _ in range(20):
         time.sleep_ms(500)
-        devs = _usbif.host_devices()
+        devs = host.devices()
         if devs:
             dev = devs[0]
             break
     if dev is None:
         print("no device attached")
-        _usbif.host_stop()
+        host.stop()
         return
 
-    dev_id, vid, pid = dev[0], dev[1], dev[2]
-    print("device {:04x}:{:04x} classes={}".format(vid, pid, dev[5]))
-    print("host_msc_open ->", _usbif.host_msc_open(dev_id))
+    print("device {:04x}:{:04x} classes={}".format(dev.vid, dev.pid, dev.classes))
+    print("msc_open ->", host.msc_open(dev.id))
 
-    blocks, bs, inquiry = _usbif.host_msc_info()
+    blocks, bs, inquiry = host.msc_info()
     print("drive: {!r}  {} MB".format(inquiry, blocks * bs // (1024 * 1024)))
 
     mbr = bytearray(bs)
-    _usbif.host_msc_read(0, mbr)
+    host.msc_read(0, mbr)
     if mbr[510] != 0x55 or mbr[511] != 0xAA:
         print("no MBR signature; not a partitioned disk")
-        _usbif.host_msc_close()
-        _usbif.host_stop()
+        host.msc_close()
+        host.stop()
         return
 
     # Partition table: four 16-byte entries starting at 0x1BE. Type byte at
@@ -113,7 +67,7 @@ def main():
         print("partition {}: type 0x{:02x} start {} count {} ({} MB)".format(
             i + 1, ptype, start, count, count * bs // (1024 * 1024)))
 
-        part = USBPartition(start, count, bs)
+        part = host.partition(start, count)          # readonly by default
         try:
             os.mount(part, "/usb", readonly=True)
         except Exception as exc:
@@ -142,8 +96,8 @@ def main():
             print("  unmounted")
         break
 
-    _usbif.host_msc_close()
-    _usbif.host_stop()
+    host.msc_close()
+    host.stop()
     print("done")
 
 

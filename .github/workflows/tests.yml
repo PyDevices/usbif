@@ -54,3 +54,31 @@ jobs:
           test -z "$(git status --porcelain)" || {
             echo "tree not pristine after reverse"; git status --porcelain; exit 1;
           }
+
+  python:
+    # The portable API and its backends, which is the half of this repository
+    # that runs off-target -- 169 tests including the conformance suite every
+    # backend is held to, and the guard that keeps `_usbif` out of examples
+    # and docs. None of it ran on a runner before: the suite needs `events`
+    # from the sibling `pydevices` checkout, so the job has to assemble the
+    # same two-repo layout a developer has, and nobody had. A guardrail
+    # nothing runs is decoration.
+    name: Portable API and backends (CPython)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: usbif
+      - uses: actions/checkout@v4
+        with:
+          repository: PyDevices/pydevices
+          path: pydevices
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run the suite
+        working-directory: usbif
+        run: python -m unittest discover -s tests -p "test_*.py" -v

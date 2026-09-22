@@ -23,7 +23,7 @@ descriptors the host reads once at enumeration, so 160x120 YUY2 comes from
 ``usbif_tusb_ext.h`` and changing it is a reflash. That is a property of the
 class, not of this example -- ask the module rather than hard-coding it::
 
-    width, height, frame_bytes = _usbif.uvc_dev_format()
+    width, height, frame_bytes = dev.uvc_format()
 
 Run it, then open the Camera app on the host::
 
@@ -34,7 +34,7 @@ import time
 
 import micropython
 
-import _usbif
+import usbif.auto
 
 
 
@@ -105,7 +105,8 @@ def open_camera(width, height):
 
 
 def main():
-    width, height, frame_bytes = _usbif.uvc_dev_format()
+    dev = usbif.auto.device()
+    width, height, frame_bytes = dev.uvc_format()
     if frame_bytes == 0:
         print("this firmware has no UVC device function built in")
         return
@@ -125,11 +126,11 @@ def main():
     row = bytearray(row_bytes)
     frame_mv = memoryview(frame)
 
-    _usbif.uvc_dev_reset()
+    dev.uvc_reset()
     # A console beside the camera, so the REPL stays reachable on the same
     # cable while the host has the video -- the same courtesy sd_drive.py
-    # extends. FN_VIDEO alone works if an application wants only the camera.
-    _usbif.dev_functions(_usbif.FN_CDC | _usbif.FN_VIDEO)
+    # extends. "uvc" alone works if an application wants only the camera.
+    dev.functions("cdc", "uvc")
     print("costume set;", "streaming the camera" if cam else "streaming colour bars")
     print("open a camera application on the host")
 
@@ -141,10 +142,10 @@ def main():
             # streaming() and ready() answer different questions and want
             # opposite responses: nobody watching means idle cheaply, while
             # watching-but-busy means come straight back.
-            if not _usbif.uvc_dev_streaming():
+            if not dev.uvc_streaming():
                 time.sleep_ms(50)
                 continue
-            if not _usbif.uvc_dev_ready():
+            if not dev.uvc_ready():
                 time.sleep_ms(2)
                 continue
 
@@ -160,17 +161,17 @@ def main():
                     frame_mv[y * row_bytes:(y + 1) * row_bytes] = row
                 phase = (phase + 2) % width
 
-            _usbif.uvc_dev_submit(frame)
+            dev.uvc_submit(frame)
             sent += 1
             if sent % 50 == 0:
                 dt = time.ticks_diff(time.ticks_ms(), t0)
                 print("%d frames, %.1f fps, stats %r"
-                      % (sent, sent * 1000 / dt, _usbif.uvc_dev_stats()))
+                      % (sent, sent * 1000 / dt, dev.uvc_stats()))
     except KeyboardInterrupt:
         print("stopping")
     finally:
         print("final stats (frames,completed,refused,streaming):",
-              _usbif.uvc_dev_stats())
+              dev.uvc_stats())
         if cam is not None:
             try:
                 cam.deinit()

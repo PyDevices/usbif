@@ -16,9 +16,9 @@
 # not by usbif itself. Run several trials and read the minimum as the
 # floor; the first trial often pays one-time costs.
 #
-# Prerequisites: uac_enable(True) done and the host's DAW armed as above;
+# Prerequisites: dev.uac_enable(True) done and the host's DAW armed as above;
 # the C pump must NOT be running (it would consume the samples this
-# script inspects) -- uac_pump_stop() first, and bring your board's
+# script inspects) -- dev.uac_pump_stop() first, and bring your board's
 # normal audio back up afterwards (on the P4 dev board: re-run
 # /soundcard.py).
 
@@ -30,7 +30,7 @@
 
 import time
 
-import _usbif
+import usbif.auto
 
 TRIALS = 8
 NOTE = 0x3C            # middle C
@@ -43,9 +43,14 @@ LOUD = 300
 
 buf = bytearray(512)
 
+# Both ends of the chain, as objects: the board's sound-card function to listen
+# on, and its MIDI function to play into. One clock, one board, two roles.
+dev = usbif.auto.device()
+port = usbif.auto.open_midi("dev:midi")
+
 
 def block_is_loud():
-    n = _usbif.uac_read(buf)
+    n = dev.uac_read(buf)
     if n <= 0:
         return False
     # Every 4th sample is plenty: an onset spans many blocks.
@@ -67,21 +72,21 @@ def drain_until_quiet():
 
 # Clear anything a previous session left ringing: a note-on whose off was
 # lost sustains forever, and "wait for silence" then waits with it.
-_usbif.midi_write(bytes([0xB0, 123, 0]))   # CC 123: all notes off
-_usbif.midi_write(bytes([0x80, NOTE, 0]))
+port.write(bytes([0xB0, 123, 0]))   # CC 123: all notes off
+port.write(bytes([0x80, NOTE, 0]))
 time.sleep(0.3)
 
 results = []
 for trial in range(TRIALS):
     drain_until_quiet()
     t0 = time.ticks_us()
-    _usbif.midi_write(bytes([0x90, NOTE, 0x7F]))
+    port.write(bytes([0x90, NOTE, 0x7F]))
     latency_ms = None
     while time.ticks_diff(time.ticks_us(), t0) < TIMEOUT_MS * 1000:
         if block_is_loud():
             latency_ms = time.ticks_diff(time.ticks_us(), t0) / 1000
             break
-    _usbif.midi_write(bytes([0x80, NOTE, 0]))
+    port.write(bytes([0x80, NOTE, 0]))
     print('trial', trial, 'latency_ms', latency_ms)
     if latency_ms is not None:
         results.append(latency_ms)

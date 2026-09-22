@@ -55,7 +55,6 @@ wedged board.
 | Hole | Issue | Consequence for examples |
 |---|---|---|
 | Device UAC is speaker-only (no mic endpoint) | [usbif#7](https://github.com/PyDevices/usbif/issues/7) | `usb_mic.py` hosts a commercial mic; no device-side capture script |
-| Portable `Device.functions()` omits video | [usbif#8](https://github.com/PyDevices/usbif/issues/8) | `usbif_webcam.py` pokes `_usbif.FN_VIDEO` directly |
 | P4 high-speed host detects nothing | [usbif#3](https://github.com/PyDevices/usbif/issues/3) | Every pairing puts the P4 in device role |
 | Host FIFO bias is build-time | [usbif#2](https://github.com/PyDevices/usbif/issues/2) | Stereo UAC host and UVC host compete; Bias-IN may cost stereo |
 
@@ -63,7 +62,9 @@ wedged board.
 
 - Headers name the use, the board role, the other end, and whether UART must
   hold the REPL (any costume that drops CDC cuts a native-USB session).
-- Prefer `usbif.auto` / portable names where they cover the class; fall back
-  to `_usbif` for streaming surfaces the portable API does not yet wrap.
+- Reach the hardware through `usbif.auto` and never through `_usbif`. The
+  C module is package-internal; `usbif.auto.host()`, `.device()` and
+  `.open_midi()` hand back objects that carry the whole surface, streaming
+  included. `tests/test_no_usbif_leak.py` enforces it.
 - No measured fps or latency numbers are claimed in headers for scripts that
   have not been re-run in this pass -- cite prior evidence or stay quiet.

@@ -18,8 +18,8 @@
 
 import time
 
-import _usbif
 import usbif
+import usbif.auto
 
 # The chord stack, in semitones above each played note. Change these and
 # the board becomes a different instrument: (12,) octaves, (3, 7) minor,
@@ -28,9 +28,14 @@ HARMONY = (4, 7)
 
 _rx = bytearray(64)
 
+# The board's own MIDI function, as a port. The same loop drives a hosted
+# controller instead by opening "host:<id>" -- role is configuration here,
+# not a code change.
+_port = usbif.auto.open_midi("dev:midi")
+
 
 def send(msg):
-    _usbif.midi_write(msg)
+    _port.write(msg)
 
 
 def harmonize(status, note, vel):
@@ -51,7 +56,7 @@ def run():
     # decides what to do with each complete message.
     parser = usbif.MidiParser()
     while True:
-        n = _usbif.midi_read(_rx)
+        n = _port.read(_rx)
         if n <= 0:
             time.sleep_ms(2)
             continue
@@ -63,3 +68,8 @@ def run():
                 harmonize(status, data[0], data[1])
             else:
                 send(bytes([status]) + bytes(data))
+
+
+# The file is its own entry point: copied to /main.py it starts at boot,
+# which is what the header promises and what nothing here used to do.
+run()
