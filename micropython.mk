@@ -15,3 +15,9 @@ SRC_USERMOD_C += \
     $(USBIF_SRC_DIR)/usbif_i2s.c \
     $(USBIF_SRC_DIR)/shared/usbif_ringbuf.c \
     $(USBIF_SRC_DIR)/shared/usbif_midi_packet.c
+
+# --- which usbif this firmware was built from ----------------------
+# Computed at build time from this repo's own git, never stored; "unknown" when
+# there is no git (a tarball). Read on a target as <module>.__revision__.
+USBIF_REVISION := $(shell git -C $(USBIF_MOD_DIR) describe --always --dirty --abbrev=7 2>/dev/null || echo unknown)
+CFLAGS_USERMOD += -DUSBIF_REVISION='"$(USBIF_REVISION)"'
