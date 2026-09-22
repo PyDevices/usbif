@@ -23,3 +23,6 @@
 # Note this does not make usbif self-contained: ``usbif/__init__.py`` imports
 # ``events``, which lives in pydevices and is installed by mip.
 package("usbif", base_path="lib", opt=3)
+
+# MicroPython 1.29: the manifest names its own C module (workspace retool, piece 1).
+c_module(".")  # this directory holds the micropython.cmake / micropython.mk for the C half
