@@ -11,100 +11,43 @@ The one-writer rule applies here exactly as it does on the device side: a
 filesystem with two writers is a corrupted filesystem, so nothing else
 should hold this stick while the board has it.
 
+The block device is ``host.partition(..., readonly=False)`` -- read-only is
+the default, because the safe answer to "may I write to the drive somebody
+just plugged in" is no, and this is the case that deliberately says yes.
+
 Verified against a commodity PNY 8 GB stick formatted FAT32 on a PC.
 """
-import _usbif
 import os
 import time
 
+import usbif.auto
 
-class USBPartition:
-    def __init__(self, start_lba, num_blocks, block_size):
-        self.start = start_lba
-        self.count = num_blocks
-        self.bs = block_size
-        self._one = bytearray(block_size)
-
-    def readblocks(self, block_num, buf, offset=0):
-        want = len(buf)
-        done = 0
-        lba = self.start + block_num
-        if offset:
-            _usbif.host_msc_read(lba, self._one)
-            take = min(want, self.bs - offset)
-            buf[0:take] = self._one[offset:offset + take]
-            done = take
-            lba += 1
-        while done < want:
-            take = min(self.bs, want - done)
-            if take == self.bs:
-                _usbif.host_msc_read(lba, memoryview(buf)[done:done + self.bs])
-            else:
-                _usbif.host_msc_read(lba, self._one)
-                buf[done:done + take] = self._one[0:take]
-            done += take
-            lba += 1
-        return 0
-
-    def writeblocks(self, block_num, buf, offset=0):
-        # Whole blocks go straight out. A partial block is read-modify-write:
-        # the host driver refuses a short write rather than padding it, and
-        # padding is exactly what would corrupt the neighbouring bytes.
-        want = len(buf)
-        done = 0
-        lba = self.start + block_num
-        if offset:
-            _usbif.host_msc_read(lba, self._one)
-            take = min(want, self.bs - offset)
-            self._one[offset:offset + take] = buf[0:take]
-            _usbif.host_msc_write(lba, self._one)
-            done = take
-            lba += 1
-        while done < want:
-            take = min(self.bs, want - done)
-            if take == self.bs:
-                _usbif.host_msc_write(lba, memoryview(buf)[done:done + self.bs])
-            else:
-                _usbif.host_msc_read(lba, self._one)
-                self._one[0:take] = buf[done:done + take]
-                _usbif.host_msc_write(lba, self._one)
-            done += take
-            lba += 1
-        return 0
-
-    def ioctl(self, op, arg):
-        if op == 4:
-            return self.count
-        if op == 5:
-            return self.bs
-        return 0
-
-
-print("host_start ->", _usbif.host_start(("msc",)))
+host = usbif.auto.host(classes=("msc",)).start()
+print("started ->", tuple(sorted(host.started)))
 
 dev = None
 for _ in range(20):
     time.sleep_ms(500)
-    devs = _usbif.host_devices()
+    devs = host.devices()
     if devs:
         dev = devs[0]
         break
 
 if dev is None:
     print("no device attached")
-    _usbif.host_stop()
+    host.stop()
 else:
-    print("host_msc_open ->", _usbif.host_msc_open(dev[0]))
-    blocks, bs, inquiry = _usbif.host_msc_info()
+    print("msc_open ->", host.msc_open(dev.id))
+    blocks, bs, inquiry = host.msc_info()
     print("drive:", repr(inquiry))
 
     mbr = bytearray(bs)
-    _usbif.host_msc_read(0, mbr)
+    host.msc_read(0, mbr)
     e = 446
     start = int.from_bytes(mbr[e + 8:e + 12], "little")
     count = int.from_bytes(mbr[e + 12:e + 16], "little")
 
-    part = USBPartition(start, count, bs)
+    part = host.partition(start, count, readonly=False)
     os.mount(part, "/usb")          # read-write this time
     print("mounted /usb read-write")
     print("before:", os.listdir("/usb"))
@@ -129,6 +72,6 @@ else:
     print(data)
     os.umount("/usb")
 
-    _usbif.host_msc_close()
-    _usbif.host_stop()
+    host.msc_close()
+    host.stop()
     print("done")

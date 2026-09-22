@@ -17,8 +17,8 @@ the display loop; deploy standalone as /main.py, or `mpftp run` it.
 import display_driver  # noqa: F401 -- wires LVGL flush + input + event_loop
 import lvgl as lv
 
-import _usbif
 import usbif
+import usbif.auto
 
 CHORDS = (
     ("Major", (4, 7)),
@@ -33,6 +33,10 @@ _state = {"chord": 0, "direction": 0}
 _harmony = ()
 _styles = []
 
+# The board's own MIDI function, opened once. Point this at "host:<id>" and
+# the same surface drives a controller the board is hosting instead.
+_port = usbif.auto.open_midi("dev:midi")
+
 
 def _rebuild_harmony():
     global _harmony
@@ -45,7 +49,7 @@ def _rebuild_harmony():
         ivs.extend(-iv for iv in base)
     _harmony = tuple(ivs)
     # No harmony may outlive the setting that created it.
-    _usbif.midi_write(bytes([0xB0, 123, 0]))
+    _port.write(bytes([0xB0, 123, 0]))
 
 
 _rebuild_harmony()
@@ -55,11 +59,11 @@ _parser = usbif.MidiParser()
 
 
 def _emit(status, note, vel):
-    _usbif.midi_write(bytes([status, note, vel]))
+    _port.write(bytes([status, note, vel]))
     for iv in _harmony:
         h = note + iv
         if 0 <= h <= 127:
-            _usbif.midi_write(bytes([status, h, vel]))
+            _port.write(bytes([status, h, vel]))
 
 
 def _pump(_t):
@@ -67,17 +71,17 @@ def _pump(_t):
     # the rest through. usbif.MidiParser owns the wire rules, and it keeps its
     # state between calls, so a message split across two timer ticks survives.
     while True:
-        n = _usbif.midi_read(_rx)
+        n = _port.read(_rx)
         if n <= 0:
             return
         _parser.feed(_rx, n)
         for status, data in _parser.drain():
             if status >= 0xF8:
-                _usbif.midi_write(bytes([status]))
+                _port.write(bytes([status]))
             elif (status & 0xF0) in (0x80, 0x90):
                 _emit(status, data[0], data[1])
             else:
-                _usbif.midi_write(bytes([status]) + bytes(data))
+                _port.write(bytes([status]) + bytes(data))
 
 
 def _matrix(parent, options, key, y_ofs, status_lbl):

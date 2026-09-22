@@ -13,7 +13,7 @@
 # so the whole matrix is checked in a fraction of a second without a host
 # in the loop. Run it after any change to the descriptor assembler.
 
-import _usbif
+import usbif.auto
 
 FAULTS = {
     -1: "wTotalLength outside the buffer",
@@ -34,40 +34,30 @@ FAULTS = {
     -16: "a class that requires an interface association lost it",
 }
 
-NAMES = (
-    ("cdc", _usbif.FN_CDC),
-    ("msc", _usbif.FN_MSC),
-    ("uac", _usbif.FN_AUDIO),
-    ("midi", _usbif.FN_MIDI),
-    ("hid", _usbif.FN_HID),
-)
-
-
-def label(mask):
-    return "+".join(n for n, b in NAMES if mask & b) or "(none)"
-
 
 def main():
-    built = _usbif.dev_functions_built()
-    restore = _usbif.dev_functions()
-    bits = [b for _, b in NAMES if built & b]
+    dev = usbif.auto.device()
+    # The names this firmware was built with, in the portable spelling. Asking
+    # the board rather than listing them here is what keeps the matrix honest
+    # when a firmware gains or loses a function -- a hand-written list would
+    # quietly stop covering the new one.
+    built = sorted(dev.functions_available())
+    restore = sorted(dev.functions())
     checked = 0
     failed = 0
     try:
-        for combo in range(1, 1 << len(bits)):
-            mask = 0
-            for i, b in enumerate(bits):
-                if combo & (1 << i):
-                    mask |= b
-            _usbif.dev_functions(mask)
-            code = _usbif.dev_desc_check()
+        for combo in range(1, 1 << len(built)):
+            names = [n for i, n in enumerate(built) if combo & (1 << i)]
+            dev.functions(*names)
+            code = dev.desc_check()
             checked += 1
             if code != 0:
                 failed += 1
                 print("FAIL {:<24} {}".format(
-                    label(mask), FAULTS.get(code, "unknown fault {}".format(code))))
+                    "+".join(names),
+                    FAULTS.get(code, "unknown fault {}".format(code))))
     finally:
-        _usbif.dev_functions(restore)
+        dev.functions(*restore)
     print("costume self-test: {} checked, {} failed".format(checked, failed))
     return failed == 0
 

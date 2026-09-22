@@ -30,7 +30,7 @@ SCSI timeouts. Measure before trusting a slow backing store under load.
 
 import time
 
-import _usbif
+import usbif.auto
 
 
 def open_card():
@@ -64,16 +64,18 @@ def open_card():
         raise RuntimeError(
             "no SD card found: this board has no native SDIO slot and no "
             "board_config peripheral to describe its wiring. Build the block "
-            "device yourself and pass it to _usbif.msc_attach_blockdev(); see "
+            "device yourself and pass it to dev.msc_attach_blockdev(); see "
             "this file's header for what qualifies."
         ) from exc
 
 
 def main():
+    dev = usbif.auto.device()
+
     # Anything a previous run left attached: the C side holds the object
     # through a VM root, so it survives a soft reset and would otherwise
     # refuse this attach.
-    _usbif.msc_detach()
+    dev.msc_detach()
 
     card = open_card()
     blocks = card.ioctl(4, 0)
@@ -81,15 +83,15 @@ def main():
     print("card: {} blocks x {} bytes = {} MB".format(
         blocks, block_size, blocks * block_size // (1024 * 1024)))
 
-    _usbif.msc_attach_blockdev(card, True)
+    dev.msc_attach_blockdev(card, True)
 
     # Present a console alongside the drive. Advertising both means the REPL
     # stays reachable on the same cable while the host has the card, which
     # is what makes this comfortable to iterate on; MSC alone works equally
     # well if that is what the application wants.
-    _usbif.dev_functions(_usbif.FN_CDC | _usbif.FN_MSC)
+    dev.functions("cdc", "msc")
 
-    attached, n_blocks, _ = _usbif.msc_status()
+    attached, n_blocks, _ = dev.msc_status()
     print("attached:", attached, "blocks:", n_blocks)
     print("the card should now appear as a drive on the host")
 
@@ -100,16 +102,16 @@ def main():
     while True:
         time.sleep_ms(5)
 
-        _, _, ejected = _usbif.msc_status()
+        _, _, ejected = dev.msc_status()
         if ejected:
             # "Safely remove" on the host side. Honouring it is what makes
             # the eject mean something, and it is the signal an application
             # waits for before touching the card again itself.
             print("host ejected the drive; releasing the card")
-            _usbif.msc_detach()
+            dev.msc_detach()
             return
 
-        calls, errors = _usbif.msc_bd_stats()
+        calls, errors = dev.msc_bd_stats()
         if calls != calls_before:
             # Errors here are block-device exceptions turned into failed SCSI
             # commands. A steadily climbing error count means the host is

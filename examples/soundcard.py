@@ -28,7 +28,7 @@ failure mode that ate an afternoon in Phase 4.
 import time
 
 import board_peripherals as bp
-import _usbif
+import usbif.auto
 
 # Host advertises 48 kHz stereo; the board codec is typically 24 kHz mono.
 # The C pump decimates. Match the board's own rate so pitch is right.
@@ -82,6 +82,7 @@ def _bring_up_codec():
 
 
 def main():
+    dev = usbif.auto.device()
     wire = _wire()
     bclk, ws, dout, mclk = wire.sck, wire.ws, wire.sd, wire.mck
     fmt = bp.AUDIO_OUT.default
@@ -91,7 +92,7 @@ def main():
 
     # Costume first so the host sees the sound card before we start the pump.
     # CDC stays so the REPL survives on the same connector.
-    _usbif.dev_functions(_usbif.FN_CDC | _usbif.FN_AUDIO)
+    dev.functions("cdc", "uac")
     print("costume: cdc+uac -- look for Speakers on the host")
 
     kwargs = {"rate": rate, "bits": bits, "channels": channels}
@@ -101,7 +102,7 @@ def main():
         # the pump used to hard-code 512, which contradicted the board and made
         # anything above 32 kHz fail outright. See usbif#12.
         kwargs["mclk_multiple"] = wire.mck_fs
-    _usbif.uac_pump_start(bclk, ws, dout, **kwargs)
+    dev.uac_pump_start(bclk, ws, dout, **kwargs)
     print("C pump started: I2S bclk=%d ws=%d dout=%d rate=%d ch=%d codec=%s"
           % (bclk, ws, dout, rate, channels, "up" if powered else "UNTOUCHED"))
     print("play audio to this board from a PC, or from usb_speaker.py on an S3")
@@ -109,13 +110,13 @@ def main():
     try:
         while True:
             time.sleep_ms(1000)
-            running, moved, idle, timeouts, shed = _usbif.uac_pump_stats()
+            running, moved, idle, timeouts, shed = dev.uac_pump_stats()
             print("pump running=%s bytes=%d idle=%d timeouts=%d shed=%d"
                   % (running, moved, idle, timeouts, shed))
     except KeyboardInterrupt:
         print("stopping")
     finally:
-        _usbif.uac_pump_stop()
+        dev.uac_pump_stop()
         if powered:
             # Amp off after the pump releases I2S, not before: dropping the
             # analog path while DMA is still clocking pops the speaker.

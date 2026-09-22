@@ -26,8 +26,8 @@
 
 import time
 
-import _usbif
 import usbif
+import usbif.auto
 
 DURATION_MS = 20000       # how long to listen once the host has mounted us
 MOUNT_TIMEOUT_MS = 10000  # how long to wait for the host to configure us
@@ -39,14 +39,14 @@ NAMES = {
 }
 
 
-def wait_for_mount():
+def wait_for_mount(dev):
     deadline = time.ticks_add(time.ticks_ms(), MOUNT_TIMEOUT_MS)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-        connected, mounted, _ = _usbif.dev_state()
+        connected, mounted, _ = dev.state()
         if mounted:
             return True
         time.sleep_ms(50)
-    connected, mounted, suspended = _usbif.dev_state()
+    connected, mounted, suspended = dev.state()
     print("not mounted after {} ms: connected={} mounted={} suspended={}".format(
         MOUNT_TIMEOUT_MS, connected, mounted, suspended))
     if not connected:
@@ -58,9 +58,9 @@ def wait_for_mount():
 
 
 def main():
-    restore = _usbif.dev_functions()
-    built = _usbif.dev_functions_built()
-    if not (built & _usbif.FN_MIDI):
+    dev = usbif.auto.device()
+    restore = dev.functions()
+    if "midi" not in dev.functions_available():
         print("this firmware has no MIDI device function built in")
         return False
 
@@ -78,18 +78,20 @@ def main():
         # Only re-enumerate if we are not already wearing it: changing the
         # function mask drops the host's connection and costs a fresh
         # enumeration, which is pure disruption when it is already correct.
-        if restore != _usbif.FN_MIDI:
-            _usbif.dev_functions(_usbif.FN_MIDI)
+        if restore != frozenset(("midi",)):
+            dev.functions("midi")
             print("costume: midi only -- look for the board as a MIDI device on the host")
         else:
             print("costume: already midi only, left alone")
-        if not wait_for_mount():
+        if not wait_for_mount(dev):
             return False
         print("mounted. play into it for {} s ...".format(DURATION_MS // 1000))
 
+        port = usbif.auto.open_midi("dev:midi")
+
         deadline = time.ticks_add(time.ticks_ms(), DURATION_MS)
         while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-            n = _usbif.midi_read(BUF)
+            n = port.read(BUF)
             if not n:
                 time.sleep_ms(2)
                 continue
@@ -114,8 +116,8 @@ def main():
                     bend_lo = min(bend_lo, value)
                     bend_hi = max(bend_hi, value)
     finally:
-        if _usbif.dev_functions() != restore:
-            _usbif.dev_functions(restore)
+        if dev.functions() != restore:
+            dev.functions(*restore)
 
     print()
     print("--- device MIDI IN ---")

@@ -14,43 +14,44 @@ four signed bytes after the ID the C side prepends via ``hid_send``.
 
 import time
 
-import _usbif
+import usbif.auto
 
 STEPS = 20
 DELTA = 4  # pixels per report
 
 
-def _send(report, retries=50):
+def _send(dev, report, retries=50):
     for _ in range(retries):
-        if _usbif.hid_send(_usbif.HID_MOUSE, report):
+        if dev.hid_send(dev.HID_MOUSE, report):
             return True
         time.sleep_ms(2)
     return False
 
 
-def move(dx, dy):
+def move(dev, dx, dy):
     # buttons=0, dx, dy, wheel=0. Values are signed 8-bit.
     def s8(n):
         return n & 0xFF
 
-    return _send(bytes([0, s8(dx), s8(dy), 0]))
+    return _send(dev, bytes([0, s8(dx), s8(dy), 0]))
 
 
 def main():
-    _usbif.dev_functions(_usbif.FN_CDC | _usbif.FN_HID)
+    dev = usbif.auto.device()
+    dev.functions("cdc", "hid")
     print("costume: cdc+hid -- watch the host cursor")
     time.sleep_ms(1500)
 
     print("moving +x")
     for _ in range(STEPS):
-        if not move(DELTA, 0):
+        if not move(dev, DELTA, 0):
             print("host did not accept a report")
             return
         time.sleep_ms(20)
 
     print("moving -x (return)")
     for _ in range(STEPS):
-        if not move(-DELTA, 0):
+        if not move(dev, -DELTA, 0):
             print("host did not accept a report")
             return
         time.sleep_ms(20)

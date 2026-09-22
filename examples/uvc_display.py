@@ -33,7 +33,7 @@ import board_config
 import micropython
 from board_config import display_drv
 
-import _usbif
+import usbif.auto
 from usbif import uvc
 
 app = appdev.App(board_config)
@@ -124,14 +124,13 @@ def yuy2_row_to_rgb565(src: ptr8, dst: ptr16, width: int, scale: int):
         j += 4
 
 
-def find_camera(timeout_ms=10000):
+def find_camera(host, timeout_ms=10000):
     """The first device the enumerator classifies as video."""
-    _usbif.host_start(("uvc",))
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-        for dev in _usbif.host_devices():
-            if "uvc" in dev[5]:
-                return dev[0]
+        found = host.find("uvc")
+        if found:
+            return found[0].id
         time.sleep_ms(250)
     return None
 
@@ -174,7 +173,7 @@ def pick_mode(dev_id, formats, alts, max_w, max_h, prefer_mjpeg):
         for interval in INTERVALS:
             if frame.intervals and interval not in frame.intervals:
                 continue
-            payload, frame_bytes = _usbif.host_uvc_negotiate(
+            payload, frame_bytes = host.uvc_negotiate(
                 dev_id, fmt.interface, fmt.index, frame.index, interval)
             if payload > IN_LIMIT:
                 continue
@@ -200,7 +199,8 @@ def _scale_geometry(frame):
     return scale, out_w, out_h, x0, y0
 
 
-dev_id = find_camera()
+host = usbif.auto.host(classes=("uvc",)).start()
+dev_id = find_camera(host)
 picked = None
 if dev_id is None:
     print("no UVC camera found on the host port")
@@ -210,7 +210,7 @@ else:
         print("jpegio present -- preferring MJPEG")
     else:
         print("jpegio absent -- uncompressed YUY2 only")
-    blob = _usbif.host_desc(dev_id)
+    blob = host.desc(dev_id)
     formats = uvc.formats(blob)
     alts = uvc.alt_settings(blob)
     if not formats:
@@ -236,8 +236,8 @@ if picked is not None:
           % (frame.width, frame.height, scale, out_w, out_h, x0, y0))
 
     src = bytearray(frame_bytes)
-    _usbif.host_uvc_open(dev_id, fmt.interface, alt.alt, alt.endpoint,
-                         alt.max_packet, frame_bytes)
+    host.uvc_open(dev_id, fmt.interface, alt.alt, alt.endpoint,
+                  alt.max_packet, frame_bytes)
     display_drv.fill(0)
     _shown = 0
     _t0 = time.ticks_ms()
@@ -257,7 +257,7 @@ if picked is not None:
 
         def _tick(_=None):
             global _shown
-            n = _usbif.host_uvc_read_frame(src)
+            n = host.uvc_read_frame(src)
             if n <= 0:
                 return
             try:
@@ -293,7 +293,7 @@ if picked is not None:
             if _shown % 25 == 0:
                 dt = time.ticks_diff(time.ticks_ms(), _t0)
                 print("%d frames, %.1f fps, stats %r"
-                      % (_shown, _shown * 1000 / dt, _usbif.host_uvc_stats()))
+                      % (_shown, _shown * 1000 / dt, host.uvc_stats()))
 
     else:
         # Uncompressed YUY2 path.
@@ -312,7 +312,7 @@ if picked is not None:
             anything else the app is running never get a turn.
             """
             global _shown
-            n = _usbif.host_uvc_read_frame(src)
+            n = host.uvc_read_frame(src)
             if n <= 0:
                 return
             # A short frame means the camera sent less than a whole picture.
@@ -331,7 +331,7 @@ if picked is not None:
             if _shown % 25 == 0:
                 dt = time.ticks_diff(time.ticks_ms(), _t0)
                 print("%d frames, %.1f fps, stats %r"
-                      % (_shown, _shown * 1000 / dt, _usbif.host_uvc_stats()))
+                      % (_shown, _shown * 1000 / dt, host.uvc_stats()))
 
     # 10 ms. Frames arrive every 200 ms at 5 fps, so nearly every tick returns
     # immediately.

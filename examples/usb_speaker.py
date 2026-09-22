@@ -20,13 +20,12 @@ space (usbif#2). On a Bias-IN build, mono may be what survives.
 import math
 import time
 
-import _usbif
+import usbif.auto
 from usbif import uac
 from usbif import uac_audio
 
 
-def find_speaker(timeout_ms=15000):
-    _usbif.host_start(("uac",))
+def find_speaker(host, timeout_ms=15000):
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
         for dev_id, streams in uac_audio.audio_devices():
@@ -56,11 +55,12 @@ def tone_frames(rate, channels, bits, freq=440.0, seconds=2.0, volume=0.2):
 
 
 def main():
-    dev_id, outs = find_speaker()
+    host = usbif.auto.host(classes=("uac",)).start()
+    dev_id, outs = find_speaker(host)
     if dev_id is None:
         print("no USB audio output found")
         print("attach a speaker, headset, or a board running soundcard.py")
-        _usbif.host_stop()
+        host.stop()
         return
 
     print("audio device", dev_id)
@@ -94,7 +94,7 @@ def main():
     finally:
         print("sent", sent, "bytes; stats", out.stats())
         out.close()
-        _usbif.host_stop()
+        host.stop()
 
 
 if __name__ == "__main__":

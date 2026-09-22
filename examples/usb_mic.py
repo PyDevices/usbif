@@ -14,15 +14,14 @@ Brad's voice (3,014 packets, zero dropped).
 
 import time
 
-import _usbif
+import usbif.auto
 from usbif import uac
 from usbif import uac_audio
 
 SECONDS = 3
 
 
-def find_mic(timeout_ms=15000):
-    _usbif.host_start(("uac",))
+def find_mic(host, timeout_ms=15000):
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
         for dev_id, streams in uac_audio.audio_devices():
@@ -53,12 +52,13 @@ def _peak_rms(buf, sample_bytes=2):
 
 
 def main():
-    dev_id, ins = find_mic()
+    host = usbif.auto.host(classes=("uac",)).start()
+    dev_id, ins = find_mic(host)
     if dev_id is None:
         print("no USB audio input found")
         print("attach a USB microphone")
         print("note: a PyDevices board cannot present as a mic yet (usbif#7)")
-        _usbif.host_stop()
+        host.stop()
         return
 
     print("audio device", dev_id)
@@ -94,7 +94,7 @@ def main():
         print("got %d / %d bytes; peak=%d rms=%.1f; stats %r"
               % (got, want, peak, rms, mic.stats()))
         mic.close()
-        _usbif.host_stop()
+        host.stop()
 
 
 if __name__ == "__main__":

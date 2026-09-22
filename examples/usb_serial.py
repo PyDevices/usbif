@@ -8,36 +8,36 @@ protocol.
     mpftp run -d COM49 examples/usb_serial.py
 
 **Pairing.** Device side is ordinary CDC (MicroPython's built-in console, or
-``dev_functions(FN_CDC)``). Host side is this script on an S3.
+``dev.functions("cdc")``). Host side is this script on an S3.
 """
 
 import time
 
-import _usbif
+import usbif.auto
 
 
-def find_cdc(timeout_ms=15000):
-    _usbif.host_start(("cdc",))
+def find_cdc(host, timeout_ms=15000):
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-        for dev in _usbif.host_devices():
-            if "cdc" in dev[5]:
-                return dev[0]
+        found = host.find("cdc")
+        if found:
+            return found[0].id
         time.sleep_ms(250)
     return None
 
 
 def main(seconds=15):
-    dev_id = find_cdc()
+    host = usbif.auto.host(classes=("cdc",)).start()
+    dev_id = find_cdc(host)
     if dev_id is None:
         print("no CDC device found")
-        _usbif.host_stop()
+        host.stop()
         return
 
     print("CDC device", dev_id)
-    _usbif.host_cdc_open(dev_id)
+    host.cdc_open(dev_id)
     msg = b"hello from usbif host\r\n"
-    n = _usbif.host_cdc_write(msg)
+    n = host.cdc_write(msg)
     print("wrote", n, "bytes:", msg)
 
     buf = bytearray(256)
@@ -45,7 +45,7 @@ def main(seconds=15):
     total = 0
     try:
         while time.ticks_diff(time.ticks_ms(), t0) < seconds * 1000:
-            got = _usbif.host_cdc_read(buf)
+            got = host.cdc_read(buf)
             if got:
                 total += got
                 print("rx:", bytes(buf[:got]))
@@ -53,8 +53,8 @@ def main(seconds=15):
                 time.sleep_ms(20)
     finally:
         print("total bytes read:", total)
-        _usbif.host_cdc_close()
-        _usbif.host_stop()
+        host.cdc_close()
+        host.stop()
 
 
 if __name__ == "__main__":

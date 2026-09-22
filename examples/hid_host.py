@@ -18,37 +18,37 @@ module docstring in ``lib/usbif/hid_keyboard.py``.
 
 import time
 
-import _usbif
 import events
+import usbif.auto
 from usbif.hid_keyboard import KeyboardDecoder
 
 
-def find_keyboard(timeout_ms=15000):
-    _usbif.host_start(("hid",))
+def find_keyboard(host, timeout_ms=15000):
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-        for dev in _usbif.host_devices():
-            if "hid" in dev[5]:
-                return dev[0]
+        found = host.find("hid")
+        if found:
+            return found[0].id
         time.sleep_ms(250)
     return None
 
 
 def main(seconds=30):
-    dev_id = find_keyboard()
+    host = usbif.auto.host(classes=("hid",)).start()
+    dev_id = find_keyboard(host)
     if dev_id is None:
         print("no HID device found")
-        _usbif.host_stop()
+        host.stop()
         return
 
     print("HID device", dev_id, "-- type on it for %d s" % seconds)
-    _usbif.host_hid_open(dev_id)
+    host.hid_open(dev_id)
     decoder = KeyboardDecoder()
     buf = bytearray(8)
     t0 = time.ticks_ms()
     try:
         while time.ticks_diff(time.ticks_ms(), t0) < seconds * 1000:
-            n = _usbif.host_hid_read(buf)
+            n = host.hid_read(buf)
             if n >= 3:
                 for ev in decoder.feed(buf):
                     kind = "DOWN" if ev.type == events.KEYDOWN else "UP"
@@ -63,8 +63,8 @@ def main(seconds=30):
             else:
                 time.sleep_ms(5)
     finally:
-        _usbif.host_hid_close()
-        _usbif.host_stop()
+        host.hid_close()
+        host.stop()
         print("done")
 
 
