@@ -14,6 +14,7 @@
 
 #include "py/runtime.h"
 #include "py/obj.h"
+#include "py/objstr.h"
 #include "py/mperrno.h"
 #include <string.h>
 
@@ -1507,7 +1508,17 @@ static mp_obj_t usbif_msc_bd_stats_py(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_msc_bd_stats_obj, usbif_msc_bd_stats_py);
 
+
+// _usbif.__revision__: which usbif this firmware was built from. The build
+// passes USBIF_REVISION (git describe) as a compile definition; a build with no
+// git says "unknown" rather than guessing.
+#ifndef USBIF_REVISION
+#define USBIF_REVISION "unknown"
+#endif
+static const MP_DEFINE_STR_OBJ(_usbif_revision_obj, USBIF_REVISION);
+
 static const mp_rom_map_elem_t usbif_module_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR___revision__), MP_ROM_PTR(&_usbif_revision_obj) },
     { MP_ROM_QSTR(MP_QSTR_msc_attach), MP_ROM_PTR(&usbif_msc_attach_obj) },
     { MP_ROM_QSTR(MP_QSTR_msc_attach_blockdev), MP_ROM_PTR(&usbif_msc_attach_blockdev_obj) },
     { MP_ROM_QSTR(MP_QSTR_msc_bd_stats), MP_ROM_PTR(&usbif_msc_bd_stats_obj) },
