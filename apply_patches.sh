@@ -5,7 +5,7 @@
 #   ./apply_patches.sh --apply  [MP_DIR]
 #   ./apply_patches.sh --revert [MP_DIR]
 #
-# MP_DIR defaults to the sibling cmods/micropython checkout.
+# MP_DIR defaults to a `micropython` checkout beside this repository.
 #
 # The patches are small and additive: two hooks that let a user C module extend
 # MicroPython's built-in USB configuration, and one that lets it vary that
@@ -18,7 +18,7 @@
 set -euo pipefail
 
 MODE="${1:---status}"
-MP_DIR="${2:-$(cd "$(dirname "$0")/.." && pwd)/cmods/micropython}"
+MP_DIR="${2:-$(cd "$(dirname "$0")/.." && pwd)/micropython}"
 PATCH_DIR="$(cd "$(dirname "$0")" && pwd)/patches"
 
 if [ ! -d "$MP_DIR" ]; then
