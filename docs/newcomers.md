@@ -2,7 +2,7 @@
 
 `usbif` gives a MicroPython board a native USB device and host surface. A board can appear to a computer as a sound card, MIDI device, keyboard, drive, or webcam; it can also host keyboards, drives, MIDI controllers, cameras, and audio devices.
 
-It is a native firmware module. The portable `usbif` API in [pydevices](https://github.com/PyDevices/pydevices) has desktop backends for enumeration and hot-plug observation, while device streaming remains board-native.
+It is a native firmware module. Its portable Python API, in `lib/usbif/`, also has Linux and Windows backends for enumeration and hot-plug observation, while device streaming remains board-native.
 
 ## Start by choosing the board's USB identity
 
@@ -40,10 +40,10 @@ Events are drained by Python polling rather than delivered directly in callbacks
 | Path | Purpose |
 |---|---|
 | `src/mod_usbif.c` | Native module entrypoint and Python surface. |
-| `src/usbif_*_dev.c` | Device-side MIDI, storage, audio, HID, and video functions. |
+| `src/usbif_{hid,msc,uvc}_dev.c`, `src/usbif_uac.c`, `src/usbif_desc.c` | Device-side HID, storage, video, audio, and the runtime descriptor. Device MIDI lives in `src/mod_usbif.c`. |
 | `src/usbif_host*.c` | Host enumeration plus CDC, HID, MSC, MIDI, UAC, and UVC support. |
 | `src/shared/` | Event ring and USB-MIDI packet code. |
-| `lib/usbif/` | Portable API and desktop backends. |
+| `lib/usbif/` | Portable API and desktop backends, frozen with the C module by `manifest.py`. |
 | `patches/` | Required MicroPython TinyUSB and ESP32 host integration patches. |
 | `examples/` | Device and host demonstrations, including costume validation. |
 | `tests/` | Native ring, leak, and API tests. |
