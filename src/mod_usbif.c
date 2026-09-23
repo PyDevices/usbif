@@ -784,6 +784,15 @@ static mp_obj_t usbif_host_uac_open_py(size_t n_args, const mp_obj_t *args) {
         // Carry the driver's own code: -1 already open, -2 bad packet size,
         // -3 no such device, -4 alt 0 carries no endpoint, -5 claim refused,
         // -6 transfer alloc failed, -7 nothing submitted.
+        if (rc == -5) {
+            // IDF answers ESP_ERR_NOT_SUPPORTED to a claim whose endpoint
+            // packet exceeds the FIFO the host was installed with, and says
+            // nothing about packets; the usual reason on this bench.
+            mp_raise_msg(&mp_type_OSError,
+                MP_ERROR_TEXT("host_uac_open failed (-5): interface claim refused -- "
+                              "usually the stream's packet exceeds the host FIFO split; "
+                              "start the host for 'uac' without 'uvc'"));
+        }
         mp_raise_msg_varg(&mp_type_OSError,
             MP_ERROR_TEXT("host_uac_open failed (%d)"), rc);
     }

@@ -398,6 +398,51 @@ static void usbif_host_client_cb(const usb_host_client_event_msg_t *msg, void *a
 #define USBIF_HOST_INSTALL_PENDING (0x7FFFFFFF)
 static volatile int usbif_host_install_result = USBIF_HOST_INSTALL_PENDING;
 
+// The controller's FIFO split, chosen from the classes this session was
+// asked to drive (usbif#2). The split is fixed at usb_host_install(), and
+// the presets compete: a camera wants IN room, a speaker wants periodic OUT
+// room, and the board's Kconfig bias serves one of them. So a session for
+// "uvc" leans IN; one for "uac" without "uvc" gets a split that carries both
+// a speaker's packet (a 2.0 device sends a millisecond plus one frame, 196
+// bytes at 48 kHz stereo) and a microphone's; anything else keeps the
+// Kconfig bias (all zeros = "decide from Kconfig" to IDF). The line counts
+// follow IDF's own formulas (hcd_dwc.c _calculate_fifo_from_bias) over the
+// 200 lines its Kconfig table accounts for on the S2/S3 (IN 600 = (152-2)*4,
+// non-periodic OUT 64 = 16*4, periodic OUT 128 = 32*4); a split that uses
+// fewer lines than the hardware has is valid, one that uses more aborts in
+// the HAL. The P4's high-speed controller has four times the FIFO.
+static void usbif_host_fifo_for(uint16_t classes, usb_host_config_t *config) {
+    #if defined(CONFIG_IDF_TARGET_ESP32P4)
+    const uint32_t k = 4;
+    #else
+    const uint32_t k = 1;
+    #endif
+    const bool uvc = (classes & USBIF_CLASS_UVC) != 0;
+    const bool uac = (classes & USBIF_CLASS_UAC) != 0;
+    const char *why;
+    if (uvc) {
+        // IDF's Bias IN: IN 600, non-periodic OUT 64, periodic OUT 128.
+        config->fifo_settings_custom.rx_fifo_lines = 152 * k;
+        config->fifo_settings_custom.nptx_fifo_lines = 16 * k;
+        config->fifo_settings_custom.ptx_fifo_lines = 32 * k;
+        why = uac ? "uvc asked for, so IN-leaning; a 2.0 speaker's packet will not fit"
+                  : "uvc asked for, so IN-leaning";
+    } else if (uac) {
+        // IN 528, non-periodic OUT 64, periodic OUT 200: a speaker at 48 kHz
+        // stereo (196) and a microphone (192) in the same session.
+        config->fifo_settings_custom.rx_fifo_lines = 134 * k;
+        config->fifo_settings_custom.nptx_fifo_lines = 16 * k;
+        config->fifo_settings_custom.ptx_fifo_lines = 50 * k;
+        why = "uac asked for without uvc, so periodic OUT gets 200 bytes";
+    } else {
+        why = "the board's Kconfig bias";
+    }
+    printf("usbif_host: FIFO split rx=%u nptx=%u ptx=%u lines (%s)\n",
+        (unsigned)config->fifo_settings_custom.rx_fifo_lines,
+        (unsigned)config->fifo_settings_custom.nptx_fifo_lines,
+        (unsigned)config->fifo_settings_custom.ptx_fifo_lines, why);
+}
+
 static void usbif_host_task(void *arg) {
     (void)arg;
     printf("usbif_host: task up on core %d\n", esp_cpu_get_core_id());
@@ -426,6 +471,7 @@ static void usbif_host_task(void *arg) {
         .peripheral_map = BIT0,
         #endif
     };
+    usbif_host_fifo_for(usbif_host_class_filter, &config);
     esp_err_t err = usb_host_install(&config);
     printf("usbif_host: install -> 0x%x\n", (unsigned)err);
     if (err == ESP_OK) {

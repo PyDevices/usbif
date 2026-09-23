@@ -56,7 +56,7 @@ wedged board.
 |---|---|---|
 | Device UAC is speaker-only (no mic endpoint) | [usbif#7](https://github.com/PyDevices/usbif/issues/7) | `usb_mic.py` hosts a commercial mic; no device-side capture script |
 | P4 high-speed host detects nothing | [usbif#3](https://github.com/PyDevices/usbif/issues/3) | Every pairing puts the P4 in device role |
-| Host FIFO bias is build-time | [usbif#2](https://github.com/PyDevices/usbif/issues/2) | Stereo UAC host and UVC host compete; Bias-IN may cost stereo |
+| Host FIFO split is per session | [usbif#2](https://github.com/PyDevices/usbif/issues/2) | `host(classes=...)` decides it: `uvc` leans IN (600 B), `uac` without `uvc` gives periodic OUT 200 B and IN 528 B; a camera and a 2.0 speaker cannot share one `start()` |
 
 ## Conventions
 

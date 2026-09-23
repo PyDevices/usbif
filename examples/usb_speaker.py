@@ -13,8 +13,12 @@ works too -- standard classes are the protocol.
 **Power.** S3 host needs a powered hub or OTG adapter. Two self-powered boards
 can back-feed unless the cable omits VBUS; see ``examples/README.md``.
 
-**FIFO bias.** Hosted stereo playback competes with hosted video for DWC FIFO
-space (usbif#2). On a Bias-IN build, mono may be what survives.
+**FIFO split.** Hosted playback competes with hosted video for DWC FIFO
+space, and the split is fixed when the host starts (usbif#2). The host picks
+it from the classes it is started for: this script asks for ``uac`` alone,
+which gives periodic OUT 200 bytes, enough for 48 kHz stereo from a USB
+Audio 2.0 device (196). A session that also asks for ``uvc`` leans IN and
+cannot open such a stream.
 """
 
 import math

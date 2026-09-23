@@ -20,6 +20,8 @@ have hardware volume can gain it later without changing what an application
 sees.
 """
 
+import time
+
 from audiodev import AudioFormat, PCMInput, PCMOutput
 
 from . import uac
@@ -147,9 +149,18 @@ class UacHostOutput(_UacHostMixin, PCMOutput):
     def _write(self, buf):
         # Short writes are normal and not an error: the ring is finite and the
         # bus drains it in real time, so a caller writing faster than realtime
-        # is told how much was taken and comes back. That is the same
-        # backpressure contract the I2S adapter provides.
-        return _usbif.host_uac_write(buf)
+        # is told how much was taken and comes back. What is not allowed is
+        # taking nothing: ``PCMOutput.write`` treats a zero as a stream that
+        # has stopped. So a full ring waits here for the bus to drain some of
+        # it -- 8 KB goes in 43 ms at 48 kHz stereo -- and only a ring that
+        # stays full for far longer than that reports no progress, which then
+        # really does mean the transfers are not completing.
+        deadline = time.ticks_add(time.ticks_ms(), 500)
+        while True:
+            n = _usbif.host_uac_write(buf)
+            if n > 0 or time.ticks_diff(deadline, time.ticks_ms()) <= 0:
+                return n
+            time.sleep_ms(1)
 
     def queued_size(self):
         queued = _usbif.host_uac_queued()
