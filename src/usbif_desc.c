@@ -125,15 +125,21 @@ static const usbif_fn_block_t usbif_blocks[] = {
     { USBIF_FN_VIDEO, USBIF_OFF_VIDEO, USBIF_LEN_VIDEO, 2, false, true  },
 };
 
-// The advertised set. Empty at boot by design: a board that always
-// enumerates as a sound card or an instrument is not merely untidy -- a host
-// will make it the default device and stall its audio engine when nothing
-// aboard is draining the stream (observed on Windows, desktop and keyboard
-// backed up). MICROPY_HW_USB_EXT_BOOT_FUNCTIONS lets a board opt into a
-// different boot identity; the default keeps the built-in classes only.
+// The advertised set at boot: CDC alone, by decision (usbif#14, Brad,
+// 2026-09-23). A board that always enumerates as a sound card or an
+// instrument is not merely untidy -- a host will make it the default device
+// and stall its audio engine when nothing aboard is draining the stream
+// (observed on Windows, desktop and keyboard backed up) -- and a drive is an
+// application decision too: a board acting as a speaker has no reason to
+// advertise mass storage to every host it meets, and a composite costume
+// changes what the board can be debugged with (stderr through the CDC of a
+// composite went nowhere on the T-Embed). So every class beyond the serial
+// console, MSC included, is worn only when Python asks through functions().
+// MSC stays compiled in when the board enables it, so it is there to wear.
+// MICROPY_HW_USB_EXT_BOOT_FUNCTIONS lets a board opt into a different boot
+// identity from its own header.
 #ifndef MICROPY_HW_USB_EXT_BOOT_FUNCTIONS
-#define MICROPY_HW_USB_EXT_BOOT_FUNCTIONS \
-    ((CFG_TUD_CDC ? USBIF_FN_CDC : 0) | (CFG_TUD_MSC ? USBIF_FN_MSC : 0))
+#define MICROPY_HW_USB_EXT_BOOT_FUNCTIONS (CFG_TUD_CDC ? USBIF_FN_CDC : 0)
 #endif
 
 static uint16_t usbif_fn_enabled = MICROPY_HW_USB_EXT_BOOT_FUNCTIONS;
