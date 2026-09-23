@@ -32,6 +32,10 @@ FAULTS = {
     -14: "bNumInterfaces disagrees with content",
     -15: "device class disagrees with the associations",
     -16: "a class that requires an interface association lost it",
+    -17: "short endpoint descriptor",
+    -18: "an IN endpoint numbered past the controller's transmit FIFOs",
+    -19: "an endpoint numbered past the controller's endpoints",
+    -20: "endpoint address used twice",
 }
 
 
@@ -45,10 +49,22 @@ def main():
     restore = sorted(dev.functions())
     checked = 0
     failed = 0
+    # Costumes this chip cannot drive: the ESP32-S3 has transmit FIFOs for
+    # IN endpoints 1..4 only, so functions() refuses a set that needs more
+    # (CDC brings two, every other function but MSC brings one). They are
+    # well-formed, just not wearable here, and are reported apart from
+    # faults. On the P4 (IN endpoints 1..7) every costume fits.
+    unwearable = []
     try:
         for combo in range(1, 1 << len(built)):
             names = [n for i, n in enumerate(built) if combo & (1 << i)]
-            dev.functions(*names)
+            try:
+                dev.functions(*names)
+            except ValueError as e:
+                if "endpoints" not in str(e):
+                    raise
+                unwearable.append("+".join(names))
+                continue
             code = dev.desc_check()
             checked += 1
             if code != 0:
@@ -58,7 +74,12 @@ def main():
                     FAULTS.get(code, "unknown fault {}".format(code))))
     finally:
         dev.functions(*restore)
-    print("costume self-test: {} checked, {} failed".format(checked, failed))
+    print("costume self-test: {} checked, {} failed, {} over this chip's endpoint budget".format(
+        checked, failed, len(unwearable)))
+    if unwearable:
+        print("  not wearable here (more IN endpoints than the controller drives):")
+        for name in unwearable:
+            print("   ", name)
     return failed == 0
 
 

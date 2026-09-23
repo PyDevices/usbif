@@ -42,6 +42,34 @@
 #include "tusb.h"
 #include "mp_usbd.h"
 
+// The chip's endpoint budget, from TinyUSB's controller table for these
+// parts (portable/synopsys/dwc2/dwc2_esp32.h). The S2/S3 controller has
+// endpoints 0..6 but transmit FIFOs for IN endpoints 0..4 only, and the
+// 0.18 dwc2 driver gives an IN endpoint the FIFO of its own number
+// (dcd_dwc2.c: depctl.tx_fifo_num = epnum), so an IN endpoint numbered 5
+// or 6 opens without complaint, queues one transfer and never completes
+// it. That was usbif#23: exactly one HID report per costume on the S3,
+// with HID sitting at the compile-time endpoint 6. The P4's high-speed
+// controller has endpoints 0..15 and FIFOs 0..7. Usermod sources build with
+// MicroPython's define set, so the IDF target comes from sdkconfig.h when
+// there is one; anything unknown gets the small controller's numbers.
+#if defined(__has_include)
+#if __has_include("sdkconfig.h")
+#include "sdkconfig.h"
+#endif
+#endif
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+#define USBIF_EP_NUM_MAX (15)   // highest endpoint number, either direction
+#define USBIF_EP_IN_MAX  (7)    // highest IN endpoint number that has a FIFO
+#else
+#define USBIF_EP_NUM_MAX (6)
+#define USBIF_EP_IN_MAX  (4)
+#endif
+// Audio interface subclasses (USB Audio 1.0/2.0 A.2), spelled here so the
+// assembler does not depend on TinyUSB's audio class header being built in.
+#define USBIF_AUDIO_SUBCLASS_STREAMING      (0x02)
+#define USBIF_AUDIO_SUBCLASS_MIDI_STREAMING (0x03)
+
 // Function identifiers, as a bitmask so Python can name a costume in one
 // integer. Values are API: they appear in usbif's Python surface.
 #define USBIF_FN_CDC   (1u << 0)
@@ -157,10 +185,11 @@ static tusb_desc_device_t usbif_desc_dev;
 // without the audio function link without it.
 void usbif_uac_on_ext_toggled(void) __attribute__((weak));
 
-// Rewrite every interface number in one emitted block, and patch endpoint
-// sizes for the negotiated speed. `delta` is how far this block's interfaces
-// moved from where the compile-time descriptor put them.
-static void usbif_fixup_block(uint8_t *p, uint16_t len, int itf_delta, uint16_t midi_mps) {
+// Rewrite every interface number in one emitted block. `delta` is how far
+// this block's interfaces moved from where the compile-time descriptor put
+// them. Endpoints are not touched here: usbif_renumber_endpoints() does
+// them over the whole assembled descriptor, once the blocks are in place.
+static void usbif_fixup_block(uint8_t *p, uint16_t len, int itf_delta) {
     uint16_t off = 0;
     uint8_t cur_class = 0;
     while (off + 2u <= len && p[off] >= 2 && off + p[off] <= len) {
@@ -220,23 +249,77 @@ static void usbif_fixup_block(uint8_t *p, uint16_t len, int itf_delta, uint16_t 
                     }
                 }
                 break;
-            case TUSB_DESC_ENDPOINT:
-                if (dlen >= 7 && midi_mps) {
-                    const uint8_t addr = d[2];
-                    #ifdef USBD_EP_MIDI_OUT
-                    if (addr == USBD_EP_MIDI_OUT || addr == USBD_EP_MIDI_IN) {
-                        d[4] = (uint8_t)(midi_mps & 0xFF);
-                        d[5] = (uint8_t)(midi_mps >> 8);
-                    }
-                    #else
-                    (void)addr;
-                    #endif
-                }
-                break;
             default:
                 break;
         }
         off = (uint16_t)(off + dlen);
+    }
+}
+
+// Endpoint addresses are assigned per costume: densely from 1 in each
+// direction, in the order the blocks were emitted. The compile-time numbers
+// count every function whether it is worn or not, which put HID at endpoint
+// 6 and MIDI at 5 -- past the S3's FIFOs (USBIF_EP_IN_MAX) in any costume.
+//
+// Two exceptions. The CDC block keeps MicroPython's own numbers (notify IN 1,
+// data OUT 2 / IN 2), since it is always first and MicroPython's console is
+// wired to it; the counters simply move past whatever it used. And an audio
+// streaming interface's isochronous OUT endpoint and its feedback IN share a
+// number, as the compile-time layout had them and as every host we have met
+// expects. The MIDI bulk pair also takes the packet size for the negotiated
+// speed here, which used to be done by matching compile-time addresses.
+static void usbif_renumber_endpoints(uint8_t *buf, uint16_t total, uint16_t midi_mps) {
+    uint8_t next_in = 1;
+    uint8_t next_out = 1;
+    uint8_t cur_class = 0;
+    uint8_t cur_subclass = 0;
+    uint8_t audio_pair = 0;     // number reserved for a feedback endpoint, 0 if none
+    for (uint16_t o = TUD_CONFIG_DESC_LEN;
+         o + 2u <= total && buf[o] >= 2 && o + buf[o] <= total;
+         o = (uint16_t)(o + buf[o])) {
+        uint8_t *d = buf + o;
+        if (d[1] == TUSB_DESC_INTERFACE && d[0] >= 9) {
+            cur_class = d[5];
+            cur_subclass = d[6];
+            audio_pair = 0;
+            continue;
+        }
+        if (d[1] != TUSB_DESC_ENDPOINT || d[0] < 7) {
+            continue;
+        }
+        const bool in = (d[2] & 0x80) != 0;
+        const uint8_t xfer = d[3] & 0x03;
+        uint8_t num;
+        if (cur_class == TUSB_CLASS_CDC || cur_class == TUSB_CLASS_CDC_DATA) {
+            num = d[2] & 0x0F;
+            if (in && next_in <= num) {
+                next_in = (uint8_t)(num + 1);
+            } else if (!in && next_out <= num) {
+                next_out = (uint8_t)(num + 1);
+            }
+        } else if (cur_class == TUSB_CLASS_AUDIO && cur_subclass == USBIF_AUDIO_SUBCLASS_STREAMING
+                   && xfer == TUSB_XFER_ISOCHRONOUS && !in) {
+            num = next_out > next_in ? next_out : next_in;
+            next_out = (uint8_t)(num + 1);
+            audio_pair = num;
+        } else if (cur_class == TUSB_CLASS_AUDIO && cur_subclass == USBIF_AUDIO_SUBCLASS_STREAMING
+                   && xfer == TUSB_XFER_ISOCHRONOUS && in && audio_pair != 0) {
+            num = audio_pair;
+            if (next_in <= num) {
+                next_in = (uint8_t)(num + 1);
+            }
+            audio_pair = 0;
+        } else if (in) {
+            num = next_in++;
+        } else {
+            num = next_out++;
+        }
+        d[2] = (uint8_t)((in ? 0x80 : 0x00) | num);
+        if (cur_class == TUSB_CLASS_AUDIO && cur_subclass == USBIF_AUDIO_SUBCLASS_MIDI_STREAMING
+            && xfer == TUSB_XFER_BULK && midi_mps) {
+            d[4] = (uint8_t)(midi_mps & 0xFF);
+            d[5] = (uint8_t)(midi_mps >> 8);
+        }
     }
 }
 
@@ -277,7 +360,7 @@ static void usbif_build_desc(void) {
                 break;
             }
         }
-        usbif_fixup_block(usbif_desc_buf + out, b->len, (int)itf - (int)base, midi_mps);
+        usbif_fixup_block(usbif_desc_buf + out, b->len, (int)itf - (int)base);
         out = (uint16_t)(out + b->len);
         itf = (uint8_t)(itf + b->itf_count);
     }
@@ -294,6 +377,8 @@ static void usbif_build_desc(void) {
             (size_t)(out - TUD_CONFIG_DESC_LEN - iad));
         out = (uint16_t)(out - iad);
     }
+
+    usbif_renumber_endpoints(usbif_desc_buf, out, midi_mps);
 
     // wTotalLength and bNumInterfaces, at their fixed offsets (USB 2.0
     // table 9-10).
@@ -385,6 +470,8 @@ int usbif_desc_check(void) {
 
     uint8_t seen_itf[32];
     memset(seen_itf, 0, sizeof(seen_itf));
+    uint8_t seen_ep[32];        // index: number, +16 for IN
+    memset(seen_ep, 0, sizeof(seen_ep));
     uint8_t highest_itf = 0;
     bool any_itf = false;
     uint16_t off = TUD_CONFIG_DESC_LEN;
@@ -422,6 +509,31 @@ int usbif_desc_check(void) {
                     return -7;          // association spans past the range
                 }
                 break;
+            case TUSB_DESC_ENDPOINT: {
+                // The numbers the renumbering walk handed out, against the
+                // controller that has to drive them. An address used twice
+                // is an assembler bug; a number past the budget is a costume
+                // this chip cannot wear, which usbif_fn_set() refuses before
+                // the host ever sees it -- silently dead endpoints are how
+                // usbif#23 looked from the outside.
+                if (dlen < 7) {
+                    return -17;         // short endpoint descriptor
+                }
+                const uint8_t num = d[2] & 0x0F;
+                const bool in = (d[2] & 0x80) != 0;
+                if (num == 0 || num > USBIF_EP_NUM_MAX) {
+                    return -19;         // past the controller's endpoints
+                }
+                if (in && num > USBIF_EP_IN_MAX) {
+                    return -18;         // an IN endpoint with no transmit FIFO
+                }
+                const uint8_t slot = (uint8_t)(num + (in ? 16 : 0));
+                if (seen_ep[slot]) {
+                    return -20;         // endpoint address used twice
+                }
+                seen_ep[slot] = 1;
+                break;
+            }
             case TUSB_DESC_CS_INTERFACE:
                 // The sibling references the assembler rewrites must land on
                 // interfaces that exist.
@@ -525,8 +637,19 @@ int usbif_fn_set(uint16_t mask) {
     if (mask == usbif_fn_enabled) {
         return 0;
     }
+    const uint16_t previous = usbif_fn_enabled;
     usbif_fn_enabled = mask;
     usbif_itf_count = 0;
+    // Try the costume on before the host sees it: one that needs more IN
+    // endpoints than this controller drives is refused here, wearing the
+    // previous set, rather than enumerated with an endpoint that swallows
+    // one transfer and never completes another.
+    const int fault = usbif_desc_check();
+    if (fault == -18 || fault == -19) {
+        usbif_fn_enabled = previous;
+        usbif_itf_count = 0;
+        return -3;      // more endpoints than this controller can drive
+    }
     if (usbif_uac_on_ext_toggled) {
         usbif_uac_on_ext_toggled();
     }
