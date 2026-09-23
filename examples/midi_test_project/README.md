@@ -90,3 +90,20 @@ not by ear. Re-running it assigns fresh GUIDs to every track and item
 (REAPER requires them unique; a diff against the checked-in file will
 show GUID churn even with no musical change — that's expected, not a
 sign anything broke).
+
+## The other direction: counting what the board sends
+
+`midi_in_count.py` is the PC half of a board-to-PC MIDI check, for Windows,
+with nothing to install: it drives `winmm` through `ctypes`, lists the MIDI
+inputs, opens the one whose name contains its first argument (a usbif board
+appears as "Espressif Device"), listens for the given seconds and prints how
+many messages arrived and the last few.
+
+```
+python midi_in_count.py Espressif 12
+```
+
+Written for usbif#23, where the S3's MIDI IN endpoint sat past the
+controller's transmit FIFOs: the board's `midi_write()` reported every byte
+taken while the PC heard nothing. Two hundred note-on/off messages sent by
+the board and two hundred counted here is the pass.
