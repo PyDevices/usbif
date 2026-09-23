@@ -51,7 +51,19 @@ dev.uac_pump_start(bclk, ws, dout, rate=24000, bits=16, channels=1)
 
 Each call re-enumerates -- USB has no way to change identity in place -- and
 the configuration descriptor is assembled at that moment, with interfaces
-renumbered and the device class set to match what was actually emitted.
+and endpoints renumbered and the device class set to match what was actually
+emitted.
+
+Endpoints are numbered per costume because the controller's budget is small.
+The ESP32-S2 and S3 drive IN endpoints 1 to 4 only (their transmit FIFOs stop
+there, and TinyUSB gives an IN endpoint the FIFO of its own number), and
+every function brings at least one: CDC two, MSC, audio, MIDI, HID and video
+one each. A costume that needs more than the chip has is refused by
+`functions()` with a `ValueError` rather than worn with an endpoint that
+swallows one transfer and never completes another (usbif#23 was that, with
+HID at a fixed endpoint 6). `examples/costume_selftest.py` lists which
+combinations the board you run it on can wear. The P4's high-speed
+controller drives IN endpoints 1 to 7, so every combination fits there.
 
 Also working, and the foundation the rest builds on:
 

@@ -1297,7 +1297,11 @@ static mp_obj_t usbif_dev_functions(size_t n_args, const mp_obj_t *args) {
         if (mask == 0) {
             mp_raise_ValueError(MP_ERROR_TEXT("a device must present at least one function"));
         }
-        if (mask < 0 || usbif_fn_set((uint16_t)mask) != 0) {
+        const int err = mask < 0 ? -1 : usbif_fn_set((uint16_t)mask);
+        if (err == -3) {
+            mp_raise_ValueError(MP_ERROR_TEXT("costume needs more IN endpoints than this controller has"));
+        }
+        if (err != 0) {
             mp_raise_ValueError(MP_ERROR_TEXT("function not built into this firmware"));
         }
     }
