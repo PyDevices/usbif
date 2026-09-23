@@ -82,8 +82,10 @@ extern int usbif_msc_read_block(uint32_t lba, uint8_t *out, size_t max);
 extern int usbif_msc_write_block(uint32_t lba, const uint8_t *data, size_t len);
 extern int usbif_msc_provoke_error(void);
 extern int usbif_host_desc_get(uint32_t dev_id, const uint8_t **out, uint16_t *len);
+extern int usbif_host_uac_clock_ranges(uint32_t dev_id, uint8_t control_itf, uint8_t clock_id,
+    uint32_t *out, int max_triplets);
 extern int usbif_host_uac_open(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
-    uint16_t mps, uint32_t rate);
+    uint16_t mps, uint32_t rate, uint8_t clock, uint8_t control, uint16_t frame);
 extern int usbif_host_uac_read(uint8_t *out, size_t max);
 extern int usbif_host_uac_write(const uint8_t *data, size_t len);
 extern int usbif_host_uac_queued(void);
@@ -774,7 +776,10 @@ static mp_obj_t usbif_host_uac_open_py(size_t n_args, const mp_obj_t *args) {
         (uint8_t)mp_obj_get_int(args[2]),
         (uint8_t)mp_obj_get_int(args[3]),
         (uint16_t)mp_obj_get_int(args[4]),
-        n_args > 5 ? (uint32_t)mp_obj_get_int(args[5]) : 0);
+        n_args > 5 ? (uint32_t)mp_obj_get_int(args[5]) : 0,
+        n_args > 6 ? (uint8_t)mp_obj_get_int(args[6]) : 0,    // 2.0 clock source id
+        n_args > 7 ? (uint8_t)mp_obj_get_int(args[7]) : 0,    // its AudioControl interface
+        n_args > 8 ? (uint16_t)mp_obj_get_int(args[8]) : 0);  // bytes per audio frame
     if (rc != 0) {
         // Carry the driver's own code: -1 already open, -2 bad packet size,
         // -3 no such device, -4 alt 0 carries no endpoint, -5 claim refused,
@@ -788,7 +793,7 @@ static mp_obj_t usbif_host_uac_open_py(size_t n_args, const mp_obj_t *args) {
     mp_raise_OSError(MP_EOPNOTSUPP);
     #endif
 }
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_host_uac_open_obj, 5, 6, usbif_host_uac_open_py);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_host_uac_open_obj, 5, 9, usbif_host_uac_open_py);
 
 static mp_obj_t usbif_host_uac_read_py(mp_obj_t buf_in) {
     #if USBIF_HAVE_HOST
@@ -854,6 +859,29 @@ static mp_obj_t usbif_host_uac_stats_py(void) {
     #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uac_stats_obj, usbif_host_uac_stats_py);
+
+// (dev_id, control_itf, clock_id) -> a flat tuple of (min, max, res) triplets
+// from a USB Audio 2.0 clock source; usbif.uac.rates_from_ranges() reads it.
+static mp_obj_t usbif_host_uac_clock_ranges_py(mp_obj_t dev_in, mp_obj_t itf_in, mp_obj_t clock_in) {
+    #if USBIF_HAVE_HOST
+    uint32_t triplets[3 * 8];
+    int n = usbif_host_uac_clock_ranges((uint32_t)mp_obj_get_int(dev_in),
+        (uint8_t)mp_obj_get_int(itf_in), (uint8_t)mp_obj_get_int(clock_in), triplets, 8);
+    if (n < 0) {
+        mp_raise_msg_varg(&mp_type_OSError,
+            MP_ERROR_TEXT("host_uac_clock_ranges failed (%d): -1 no such device, -2 request refused, -3 short answer"), n);
+    }
+    mp_obj_t items[3 * 8];
+    for (int i = 0; i < 3 * n; i++) {
+        items[i] = mp_obj_new_int_from_uint(triplets[i]);
+    }
+    return mp_obj_new_tuple((size_t)(3 * n), items);
+    #else
+    (void)dev_in; (void)itf_in; (void)clock_in;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_3(usbif_host_uac_clock_ranges_obj, usbif_host_uac_clock_ranges_py);
 
 static mp_obj_t usbif_host_uac_close_py(void) {
     #if USBIF_HAVE_HOST
@@ -1563,6 +1591,7 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_uac_write), MP_ROM_PTR(&usbif_host_uac_write_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_queued), MP_ROM_PTR(&usbif_host_uac_queued_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_stats), MP_ROM_PTR(&usbif_host_uac_stats_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uac_clock_ranges), MP_ROM_PTR(&usbif_host_uac_clock_ranges_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_close), MP_ROM_PTR(&usbif_host_uac_close_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uvc_negotiate), MP_ROM_PTR(&usbif_host_uvc_negotiate_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uvc_open), MP_ROM_PTR(&usbif_host_uvc_open_obj) },

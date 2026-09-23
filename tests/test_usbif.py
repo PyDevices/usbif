@@ -1131,6 +1131,93 @@ def _uac_blob(rates=(48000,), channels=1, bits=16, ep=0x81, attrs=0x05,
 AS_GENERAL_SUBTYPE = 0x01
 
 
+def _uac2_blob(channels=2, bits=16, ep=0x03, max_packet=196, clock_id=0x04,
+               terminal_link=0x01, name_clock_in_terminal=True):
+    """A realistic USB Audio 2.0 speaker blob, the shape usbif's own device
+    emits: AudioControl with a 2.0 header, a clock source, an input terminal
+    naming that clock, an output terminal; then AudioStreaming alt 0 and alt
+    1 with the 2.0 AS_GENERAL (channels inside it), the six-byte Type I
+    format, and an isochronous OUT endpoint. No rates anywhere, which is the
+    point: they live behind a control request to the clock."""
+    def itf(number, alt, n_eps, subclass):
+        return bytes([9, 0x04, number, alt, n_eps, 0x01, subclass, 0x20, 0x00])
+
+    parts = [bytes([9, 0x02, 0, 0, 2, 1, 0, 0x80, 50])]        # CONFIGURATION
+    parts.append(itf(2, 0, 0, 0x01))                            # AudioControl (itf 2)
+    parts.append(bytes([9, 0x24, 0x01, 0x00, 0x02, 0x08, 0, 0, 0]))   # header, bcdADC 0x0200
+    parts.append(bytes([8, 0x24, 0x0A, clock_id, 0x01, 0x07, 0x00, 0]))  # clock source
+    csource = clock_id if name_clock_in_terminal else 0
+    parts.append(bytes([17, 0x24, 0x02, terminal_link, 0x01, 0x01, 0x00, csource,
+                        channels, 0, 0, 0, 0, 0, 0, 0, 0]))     # input terminal
+    parts.append(bytes([12, 0x24, 0x03, 0x03, 0x01, 0x03, 0x00, 0x02, csource, 0, 0, 0]))
+    parts.append(itf(3, 0, 0, 0x02))                            # AS alt 0: silent
+    parts.append(itf(3, 1, 2, 0x02))                            # AS alt 1
+    parts.append(bytes([16, 0x24, 0x01, terminal_link, 0x00, 0x01, 0x01, 0, 0, 0,
+                        channels, 0, 0, 0, 0, 0]))              # AS_GENERAL (2.0)
+    parts.append(bytes([6, 0x24, 0x02, 0x01, bits // 8, bits]))  # Type I format (2.0)
+    parts.append(bytes([7, 0x05, ep, 0x05, max_packet & 0xFF, (max_packet >> 8) & 0xFF, 1]))
+    parts.append(bytes([8, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]))  # CS endpoint
+    parts.append(bytes([7, 0x05, 0x80 | (ep & 0x0F), 0x11, 4, 0, 1]))   # feedback IN
+    blob = b"".join(parts)
+    return blob[:2] + bytes([len(blob) & 0xFF, (len(blob) >> 8) & 0xFF]) + blob[4:]
+
+
+class TestUac2DescriptorParsing(unittest.TestCase):
+    """USB Audio 2.0 reading: the layouts differ from 1.0 in every descriptor
+    the parser touches, and the rates are not in the descriptors at all.
+    Found the hard way (usbif#28): the S3 hosting the P4, itself a 2.0
+    device, read it as "? Hz x 0ch x 0bit"."""
+
+    def test_channels_bits_and_endpoint_come_from_the_2_0_layouts(self):
+        from usbif import uac
+        (stream,) = uac.streams(_uac2_blob())
+        self.assertEqual(stream.direction, uac.OUT)
+        self.assertEqual(stream.channels, 2)
+        self.assertEqual(stream.bits, 16)
+        self.assertEqual(stream.frame_bytes, 2)
+        self.assertEqual(stream.endpoint, 0x03)
+        self.assertEqual(stream.max_packet, 196)
+        self.assertEqual(stream.sync, "async")
+
+    def test_rates_are_empty_and_the_clock_is_named(self):
+        from usbif import uac
+        (stream,) = uac.streams(_uac2_blob())
+        self.assertEqual(stream.rates, ())
+        self.assertEqual(stream.clock, 0x04)
+        self.assertEqual(stream.control, 2)
+
+    def test_the_first_clock_serves_when_no_terminal_names_one(self):
+        from usbif import uac
+        (stream,) = uac.streams(_uac2_blob(name_clock_in_terminal=False))
+        self.assertEqual(stream.clock, 0x04)
+
+    def test_a_1_0_stream_carries_no_clock(self):
+        from usbif import uac
+        (stream,) = uac.streams(_uac_blob())
+        self.assertEqual((stream.clock, stream.control), (0, 0))
+
+    def test_the_feedback_endpoint_is_not_a_stream(self):
+        from usbif import uac
+        found = uac.streams(_uac2_blob())
+        self.assertEqual(len(found), 1)
+
+    def test_rates_from_a_clock_range_answer(self):
+        from usbif import uac
+        # One discrete rate, the way usbif's own device answers.
+        self.assertEqual(uac.rates_from_ranges((48000, 48000, 0)), (48000,))
+        # Two discrete subranges.
+        self.assertEqual(uac.rates_from_ranges((44100, 44100, 0, 48000, 48000, 0)),
+                         (44100, 48000))
+        # A continuous range expands to the standard rates it contains.
+        self.assertEqual(uac.rates_from_ranges((8000, 48000, 1)),
+                         (8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000))
+        # A stepped range keeps only rates on the step.
+        self.assertEqual(uac.rates_from_ranges((8000, 48000, 8000)), (8000, 16000, 24000, 32000, 48000))
+        # Empty and short answers give nothing.
+        self.assertEqual(uac.rates_from_ranges(()), ())
+        self.assertEqual(uac.rates_from_ranges((48000, 48000)), ())
+
+
 class TestUacDescriptorParsing(unittest.TestCase):
     """UAC 1.0 descriptor reading -- how a host learns what a device can do.
 
@@ -1388,8 +1475,20 @@ class FakeUacUsbif:
             raise OSError("no such device")
         return self.blob
 
-    def host_uac_open(self, dev_id, itf, alt, ep, mps, rate=0):
+    def host_uac_open(self, dev_id, itf, alt, ep, mps, rate=0, clock=0, control=0, frame=0):
         self.opened = (dev_id, itf, alt, ep, mps, rate)
+        # The 2.0 arguments, kept apart so the 1.0 assertions above read as before.
+        self.opened_2_0 = (clock, control, frame)
+
+    # A 2.0 clock source's answer: one discrete rate unless a test sets
+    # ``ranges``; ``ranges_asked`` records (dev_id, control, clock).
+    ranges = (48000, 48000, 0)
+
+    def host_uac_clock_ranges(self, dev_id, control, clock):
+        if dev_id != self.dev_id:
+            raise OSError("no such device")
+        self.ranges_asked = getattr(self, "ranges_asked", []) + [(dev_id, control, clock)]
+        return self.ranges
 
     def host_uac_write(self, data):
         self.written.extend(data)
@@ -1432,6 +1531,39 @@ class TestUacAudioSelection(unittest.TestCase):
         fake = FakeUacUsbif(blob if blob is not None else _CODEC, classes=classes)
         self.mod._usbif = fake
         return fake
+
+    def test_a_2_0_device_gets_its_rates_from_the_clock(self):
+        # usbif's own sound card: no rates in the descriptors, one clock
+        # source, which the host asks once and fills into the stream.
+        fake = self._install(_uac2_blob())
+        found = self.mod.audio_devices()
+        self.assertEqual(len(found), 1)
+        dev_id, streams = found[0]
+        (stream,) = streams
+        self.assertEqual(stream.rates, (48000,))
+        self.assertEqual(fake.ranges_asked, [(4, 2, 0x04)])
+
+    def test_a_2_0_stream_opens_through_its_clock(self):
+        fake = self._install(_uac2_blob())
+        out = self.mod.output(4)
+        out.open()
+        self.assertEqual(fake.opened[5], 48000)
+        # clock source 4 on AudioControl interface 2; 4 bytes per stereo
+        # 16-bit frame so playback packets carry one millisecond, not mps.
+        self.assertEqual(fake.opened_2_0, (0x04, 2, 4))
+        out.close()
+
+    def test_a_2_0_clock_that_will_not_answer_leaves_no_rates(self):
+        fake = self._install(_uac2_blob())
+
+        def refuse(dev_id, control, clock):
+            raise OSError("request refused")
+
+        fake.host_uac_clock_ranges = refuse
+        (stream,) = self.mod.audio_devices()[0][1]
+        self.assertEqual(stream.rates, ())
+        with self.assertRaises(ValueError):
+            self.mod.output(4)
 
     def test_audio_devices_reads_the_real_descriptor(self):
         self._install()

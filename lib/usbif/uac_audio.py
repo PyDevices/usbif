@@ -54,10 +54,38 @@ def audio_devices(host_devices=None):
             blob = _usbif.host_desc(dev[0])
         except OSError:
             continue
-        streams = uac.streams(blob)
+        streams = _with_clock_rates(dev[0], uac.streams(blob))
         if streams:
             found.append((dev[0], streams))
     return tuple(found)
+
+
+def _with_clock_rates(dev_id, streams):
+    """Fill in the rates of USB Audio 2.0 streams.
+
+    A 2.0 stream's descriptors name a clock source and say nothing about
+    rates; the clock answers a RANGE request. One request per clock, and a
+    clock that will not answer leaves the stream with no rates, which
+    ``choose`` then declines rather than guessing.
+    """
+    out = []
+    asked = {}
+    rates_at = uac.STREAM_FIELDS.index("rates")
+    for s in streams:
+        if s.rates or not s.clock:
+            out.append(s)
+            continue
+        key = (s.control, s.clock)
+        if key not in asked:
+            try:
+                asked[key] = uac.rates_from_ranges(
+                    _usbif.host_uac_clock_ranges(dev_id, s.control, s.clock))
+            except OSError:
+                asked[key] = ()
+        fields = list(s)
+        fields[rates_at] = asked[key]
+        out.append(uac.UacStream(*fields))
+    return tuple(out)
 
 
 def _pick(dev_id, direction, rate, channels, bits):
@@ -79,7 +107,9 @@ class _UacHostMixin:
 
     def _uac_open(self, stream):
         _usbif.host_uac_open(self._dev_id, stream.interface, stream.alt,
-                             stream.endpoint, stream.max_packet, self._rate)
+                             stream.endpoint, stream.max_packet, self._rate,
+                             stream.clock, stream.control,
+                             stream.channels * stream.frame_bytes)
 
     def _close(self):
         _usbif.host_uac_close()
