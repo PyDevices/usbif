@@ -65,10 +65,9 @@
 #define USBIF_EP_NUM_MAX (6)
 #define USBIF_EP_IN_MAX  (4)
 #endif
-// Audio interface subclasses (USB Audio 1.0/2.0 A.2), spelled here so the
-// assembler does not depend on TinyUSB's audio class header being built in.
-#define USBIF_AUDIO_SUBCLASS_STREAMING      (0x02)
-#define USBIF_AUDIO_SUBCLASS_MIDI_STREAMING (0x03)
+// The AudioStreaming interface subclass (USB Audio 2.0 A.2), spelled here so
+// the assembler does not depend on TinyUSB's audio class header being built in.
+#define USBIF_AUDIO_SUBCLASS_STREAMING (0x02)
 
 // Function identifiers, as a bitmask so Python can name a costume in one
 // integer. Values are API: they appear in usbif's Python surface.
@@ -266,9 +265,15 @@ static void usbif_fixup_block(uint8_t *p, uint16_t len, int itf_delta) {
 // wired to it; the counters simply move past whatever it used. And an audio
 // streaming interface's isochronous OUT endpoint and its feedback IN share a
 // number, as the compile-time layout had them and as every host we have met
-// expects. The MIDI bulk pair also takes the packet size for the negotiated
-// speed here, which used to be done by matching compile-time addresses.
-static void usbif_renumber_endpoints(uint8_t *buf, uint16_t total, uint16_t midi_mps) {
+// expects. Every bulk endpoint also takes the packet size for the negotiated
+// speed here: the build sizes them for the fastest the controller can do,
+// 512 bytes on the P4, and a device that attaches at full speed -- behind
+// a full-speed host such as the S3's -- must offer 64. TinyUSB checks that
+// (tu_edpt_validate) when the host sets the configuration, and a 512-byte
+// bulk endpoint at full speed fails it, so SET_CONFIGURATION stalls EP0 and
+// the device never enumerates: usbif#24, every costume with CDC in it. MIDI
+// used to be the one class patched this way, by compile-time address.
+static void usbif_renumber_endpoints(uint8_t *buf, uint16_t total, uint16_t bulk_mps) {
     uint8_t next_in = 1;
     uint8_t next_out = 1;
     uint8_t cur_class = 0;
@@ -315,17 +320,16 @@ static void usbif_renumber_endpoints(uint8_t *buf, uint16_t total, uint16_t midi
             num = next_out++;
         }
         d[2] = (uint8_t)((in ? 0x80 : 0x00) | num);
-        if (cur_class == TUSB_CLASS_AUDIO && cur_subclass == USBIF_AUDIO_SUBCLASS_MIDI_STREAMING
-            && xfer == TUSB_XFER_BULK && midi_mps) {
-            d[4] = (uint8_t)(midi_mps & 0xFF);
-            d[5] = (uint8_t)(midi_mps >> 8);
+        if (xfer == TUSB_XFER_BULK && bulk_mps) {
+            d[4] = (uint8_t)(bulk_mps & 0xFF);
+            d[5] = (uint8_t)(bulk_mps >> 8);
         }
     }
 }
 
 // Assemble the configuration descriptor for the currently enabled set.
 static void usbif_build_desc(void) {
-    const uint16_t midi_mps = (tud_speed_get() == TUSB_SPEED_HIGH) ? 512 : 64;
+    const uint16_t bulk_mps = (tud_speed_get() == TUSB_SPEED_HIGH) ? 512 : 64;
     uint16_t out = TUD_CONFIG_DESC_LEN;
     uint8_t itf = 0;
     uint8_t fn_count = 0;
@@ -378,7 +382,7 @@ static void usbif_build_desc(void) {
         out = (uint16_t)(out - iad);
     }
 
-    usbif_renumber_endpoints(usbif_desc_buf, out, midi_mps);
+    usbif_renumber_endpoints(usbif_desc_buf, out, bulk_mps);
 
     // wTotalLength and bNumInterfaces, at their fixed offsets (USB 2.0
     // table 9-10).
