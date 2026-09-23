@@ -32,7 +32,7 @@ import usbif.auto
 
 # Host advertises 48 kHz stereo; the board codec is typically 24 kHz mono.
 # The C pump decimates. Match the board's own rate so pitch is right.
-DEFAULT_VOLUME = 85  # digital gain on this hardware; see phase0 findings
+DEFAULT_VOLUME = 85  # digital gain; 100 overdrives the P4 panel amp, 50 is barely audible
 
 
 def _wire():
