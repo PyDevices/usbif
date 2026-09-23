@@ -20,7 +20,22 @@ have hardware volume can gain it later without changing what an application
 sees.
 """
 
-import time
+try:
+    from time import sleep_ms, ticks_add, ticks_diff, ticks_ms
+except ImportError:  # CPython, where the desktop backends and the tests run
+    import time as _time
+
+    def ticks_ms():
+        return int(_time.monotonic() * 1000)
+
+    def ticks_add(t, delta):
+        return t + delta
+
+    def ticks_diff(a, b):
+        return a - b
+
+    def sleep_ms(ms):
+        _time.sleep(ms / 1000)
 
 from audiodev import AudioFormat, PCMInput, PCMOutput
 
@@ -155,12 +170,12 @@ class UacHostOutput(_UacHostMixin, PCMOutput):
         # it -- 8 KB goes in 43 ms at 48 kHz stereo -- and only a ring that
         # stays full for far longer than that reports no progress, which then
         # really does mean the transfers are not completing.
-        deadline = time.ticks_add(time.ticks_ms(), 500)
+        deadline = ticks_add(ticks_ms(), 500)
         while True:
             n = _usbif.host_uac_write(buf)
-            if n > 0 or time.ticks_diff(deadline, time.ticks_ms()) <= 0:
+            if n > 0 or ticks_diff(deadline, ticks_ms()) <= 0:
                 return n
-            time.sleep_ms(1)
+            sleep_ms(1)
 
     def queued_size(self):
         queued = _usbif.host_uac_queued()
