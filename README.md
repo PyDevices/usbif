@@ -4,14 +4,17 @@ Native USB for MicroPython: a board that a computer sees as a sound card, a
 MIDI instrument or a webcam, and — on the same board — a USB host that a
 keyboard, thumb drive, MIDI controller or camera plugs into.
 
+New here? Read the [newcomer's guide](docs/newcomers.md) for USB identity,
+host sessions, event delivery, and the firmware integration boundary.
+
 `usbif` is one of the PyDevices `*if` modules, with
 [`displayif`](https://github.com/PyDevices/displayif),
 [`audioif`](https://github.com/PyDevices/audioif) and
 [`cameraif`](https://github.com/PyDevices/cameraif): a native C module with a
 thin, stable Python surface that higher-level packages build on. The portable
-API ships separately, as `lib/usbif` in
-[`pydevices`](https://github.com/PyDevices/pydevices), and is implemented twice
-— once by this module and once by desktop backends over OS services. That
+API lives here too, in `lib/usbif`, frozen with the C module by `manifest.py`,
+and is implemented twice — once by this module and once by desktop backends
+over OS services. That
 portability covers enumeration, device identity and hot-plug events today, so
 an application that observes devices runs unchanged on a workstation; the
 streaming surfaces (the audio pump, the video endpoint) are methods on the
@@ -67,8 +70,8 @@ controller drives IN endpoints 1 to 7, so every combination fits there.
 
 Also working, and the foundation the rest builds on:
 
-- the portable API and its Linux and Windows desktop backends, in `pydevices`
-  (`lib/usbif`), with one conformance suite run against every backend
+- the portable API and its Linux and Windows desktop backends, in `lib/usbif`,
+  with one conformance suite run against every backend
 - the event transport in C (`src/shared/usbif_ringbuf.c`), with host-side tests
 - a structural validator for the descriptor assembler
   (`examples/costume_selftest.py`), which checks every costume the firmware
@@ -120,9 +123,8 @@ mapped to a drive letter, and **488 block ranges served with zero errors**.
 What is *not* yet exercised is the write path against a host, and the card
 used carries no filesystem Windows can mount, so Explorer shows no files
 on it; both wait on formatting a card, which destroys data and so waits on
-a decision rather than being assumed. See `docs/phase0-findings.md`,
-including the P4's SDMMC pin map (its `machine.SDCard()` needs explicit
-pins) and two rough edges in card initialisation.
+a decision rather than being assumed. The P4's `machine.SDCard()` needs
+explicit pins, and card initialisation has two rough edges.
 
 And the working host side carries honest limits for now: the controller's
 FIFO split is fixed when the host starts, so `host(classes=...)` chooses it
@@ -170,8 +172,7 @@ distinction already drawn for the P4. The S3 board-header patch in the build
 workspace's `patches/usbif-NN-*` series now enables it too (matching the P4's
 own patch), and
 `examples/costume_selftest.py` confirms **31 of 31** on the S3 as well.
-All are recorded in [`docs/phase0-findings.md`](docs/phase0-findings.md).
-The plan and the evidence behind every decision are in [`docs/`](docs/).
+The API design is in [`docs/api-sketch.md`](docs/api-sketch.md).
 
 ## Why the events are drained rather than delivered
 
@@ -273,7 +274,8 @@ rather than a reflash:
 cc -std=c11 -Wall -Wextra -Werror -Isrc -o /tmp/test_ringbuf tests/test_ringbuf.c src/shared/usbif_ringbuf.c && /tmp/test_ringbuf
 ```
 
-The portable API's conformance suite lives with the API, in `pydevices`:
+The portable API's conformance suite lives with the API, in this repository
+(it finds `events` and `audiodev` in a sibling `pydevices` checkout):
 
 ```bash
 python -m unittest discover -s tests -p "test_usbif.py"
