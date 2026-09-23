@@ -48,7 +48,7 @@ BARS = (
 
 
 @micropython.viper
-def render_row(dst: ptr8, width: int, phase: int, ys: ptr8, us: ptr8, vs: ptr8,
+def render_row(dst: ptr8, width: int, phase: int, ys: ptr8, us: ptr8, vs: ptr8,  # noqa: F821
                nbars: int):
     """One YUY2 row of vertical colour bars, scrolled by ``phase`` pixels.
 

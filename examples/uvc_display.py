@@ -57,7 +57,7 @@ except ImportError:
 
 
 @micropython.viper
-def yuy2_row_to_rgb565(src: ptr8, dst: ptr16, width: int, scale: int):
+def yuy2_row_to_rgb565(src: ptr8, dst: ptr16, width: int, scale: int):  # noqa: F821
     """One YUY2 row to RGB565, widened by an integer factor.
 
     YUY2 packs two pixels into four bytes -- Y0 U Y1 V -- so the two pixels
