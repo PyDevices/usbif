@@ -51,6 +51,15 @@ CLASS_AUDIO = 0x01
 SUBCLASS_AUDIOCONTROL = 0x01
 SUBCLASS_AUDIOSTREAMING = 0x02
 
+# AudioControl class-specific interface descriptor subtypes the parser reads
+# (USB Audio 1.0 table A-5, 2.0 table A-9). The 2.0 layouts differ from 1.0
+# in every one of these, which is why the header's bcdADC is read first and
+# the version decides the offsets below.
+AC_HEADER = 0x01
+AC_INPUT_TERMINAL = 0x02
+AC_OUTPUT_TERMINAL = 0x03
+AC_CLOCK_SOURCE = 0x0A          # 2.0 only
+
 # AudioStreaming class-specific interface descriptor subtypes
 AS_GENERAL = 0x01
 AS_FORMAT_TYPE = 0x02
@@ -67,9 +76,14 @@ EP_USAGE_FEEDBACK = 0x10
 
 IN, OUT = "in", "out"
 
+# ``clock`` and ``control`` are USB Audio 2.0's: the clock source entity the
+# stream's terminal is clocked from and the AudioControl interface that owns
+# it. Rates are a control request to that clock, not descriptor bytes, so a
+# 2.0 stream parses with ``rates == ()`` and the host fills them in (see
+# ``uac_audio.audio_devices``). Both are 0 for a 1.0 stream.
 STREAM_FIELDS = ("interface", "alt", "endpoint", "direction", "rates",
                  "channels", "bits", "frame_bytes", "max_packet", "interval",
-                 "sync", "terminal")
+                 "sync", "terminal", "clock", "control")
 
 UacStream = namedtuple("UacStream", " ".join(STREAM_FIELDS))  # noqa: PYI024
 
@@ -118,10 +132,23 @@ def streams(blob):
 
     Feedback endpoints are excluded for the same reason -- they carry rate
     corrections, not samples.
+
+    Both USB Audio 1.0 and 2.0 are read. A 1.0 stream says everything in its
+    FORMAT_TYPE descriptor (channels, bit depth, the rate list). A 2.0 stream
+    puts channels in AS_GENERAL, bit depth in a shorter FORMAT_TYPE, and no
+    rates anywhere: those come from the clock source the stream's terminal
+    names, by a control request, so the stream carries ``clock`` and
+    ``control`` and the caller asks (usbif's own sound card is 2.0, which is
+    how this was found: the S3 hosting the P4 saw "? Hz x 0ch x 0bit").
     """
     found = []
     itf = alt = None
     pending = None
+    control = 0             # the AudioControl interface number
+    in_control = False
+    uac2 = False
+    clocks = []             # 2.0 clock source ids, in descriptor order
+    terminal_clock = {}     # 2.0: terminal id -> clock source id
 
     for length, dtype, body in descriptors(blob):
         if dtype == DT_INTERFACE and length >= 9:
@@ -129,11 +156,27 @@ def streams(blob):
                 found.append(pending)
                 pending = None
             itf, alt = body[2], body[3]
+            in_control = body[5] == CLASS_AUDIO and body[6] == SUBCLASS_AUDIOCONTROL
+            if in_control:
+                control = itf
             if body[5] == CLASS_AUDIO and body[6] == SUBCLASS_AUDIOSTREAMING and alt != 0:
                 pending = {"interface": itf, "alt": alt, "terminal": None,
                            "rates": (), "channels": 0, "bits": 0, "frame_bytes": 0,
                            "endpoint": None, "direction": None,
-                           "max_packet": 0, "interval": 0, "sync": None}
+                           "max_packet": 0, "interval": 0, "sync": None,
+                           "clock": 0, "control": control}
+            continue
+
+        if in_control and dtype == DT_CS_INTERFACE and length >= 3:
+            subtype = body[2]
+            if subtype == AC_HEADER and length >= 5:
+                uac2 = body[4] == 0x02                # bcdADC 0x0200
+            elif uac2 and subtype == AC_CLOCK_SOURCE and length >= 4:
+                clocks.append(body[3])                # bClockID
+            elif uac2 and subtype == AC_INPUT_TERMINAL and length >= 8:
+                terminal_clock[body[3]] = body[7]     # bTerminalID -> bCSourceID
+            elif uac2 and subtype == AC_OUTPUT_TERMINAL and length >= 9:
+                terminal_clock[body[3]] = body[8]     # bTerminalID -> bCSourceID
             continue
 
         if pending is None:
@@ -141,13 +184,21 @@ def streams(blob):
 
         if dtype == DT_CS_INTERFACE and length >= 3:
             subtype = body[2]
-            if subtype == AS_GENERAL and length >= 7:
-                pending["terminal"] = body[3]
-            elif subtype == AS_FORMAT_TYPE and length >= 8:
-                pending["channels"] = body[4]
-                pending["frame_bytes"] = body[5]      # bSubframeSize
-                pending["bits"] = body[6]             # bBitResolution
-                pending["rates"] = _rates(body, 8, body[7])
+            if subtype == AS_GENERAL:
+                if uac2 and length >= 16:
+                    pending["terminal"] = body[3]
+                    pending["channels"] = body[10]    # bNrChannels
+                elif length >= 7:
+                    pending["terminal"] = body[3]
+            elif subtype == AS_FORMAT_TYPE:
+                if uac2 and length >= 6:
+                    pending["frame_bytes"] = body[4]  # bSubslotSize
+                    pending["bits"] = body[5]         # bBitResolution
+                elif length >= 8:
+                    pending["channels"] = body[4]
+                    pending["frame_bytes"] = body[5]      # bSubframeSize
+                    pending["bits"] = body[6]             # bBitResolution
+                    pending["rates"] = _rates(body, 8, body[7])
         elif dtype == DT_ENDPOINT and length >= 7:
             attrs = body[3]
             if (attrs & EP_XFER_MASK) != EP_XFER_ISOC:
@@ -166,7 +217,42 @@ def streams(blob):
     if pending is not None:
         found.append(pending)
 
+    if uac2:
+        for s in found:
+            # The terminal the stream links to names its clock; a device
+            # whose terminals say nothing gets the first clock source, which
+            # is the only one most have.
+            s["clock"] = terminal_clock.get(s["terminal"]) or (clocks[0] if clocks else 0)
+
     return tuple(UacStream(**s) for s in found if s["endpoint"] is not None)
+
+
+# Rates a host may ask a 2.0 clock for when the clock answers with a range
+# rather than a list. A continuous range is rare in practice and a real
+# device that offers one still expects one of these.
+STANDARD_RATES = (8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000,
+                  88200, 96000, 176400, 192000)
+
+
+def rates_from_ranges(triplets):
+    """Sample rates from a 2.0 clock source's RANGE answer.
+
+    ``triplets`` is a flat sequence of (min, max, res) as the C host returns
+    it. A subrange with ``res == 0`` (or ``min == max``) is one discrete rate;
+    any other is expanded to the standard rates it contains, stepping by
+    ``res`` from ``min``.
+    """
+    out = []
+    for i in range(0, len(triplets) - 2, 3):
+        lo, hi, res = triplets[i], triplets[i + 1], triplets[i + 2]
+        if res == 0 or lo == hi:
+            if lo > 0 and lo not in out:
+                out.append(lo)
+            continue
+        for r in STANDARD_RATES:
+            if lo <= r <= hi and (r - lo) % res == 0 and r not in out:
+                out.append(r)
+    return tuple(sorted(out))
 
 
 def has_audio(blob):

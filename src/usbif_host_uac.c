@@ -95,6 +95,18 @@ extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
 #define UAC_SAMPLING_FREQ_CONTROL   (0x01)
 #define UAC_REQTYPE_SET_EP          (0x22)   // host->device, class, endpoint
 
+// USB Audio 2.0 moves the sampling frequency to the clock source entity
+// (5.2.5.1.2): RANGE answers wNumSubRanges then (dMIN, dMAX, dRES) triplets
+// of 32 bits, CUR sets one; the recipient is the AudioControl interface,
+// wIndex = clock id << 8 | interface. usbif's own sound card is a 2.0
+// device, and until this existed the S3 could not host the P4 (usbif#28).
+#define UAC2_CUR                    (0x01)
+#define UAC2_RANGE                  (0x02)
+#define UAC2_CS_SAM_FREQ_CONTROL    (0x01)
+#define UAC2_REQTYPE_SET_ITF        (0x21)   // host->device, class, interface
+#define UAC2_REQTYPE_GET_ITF        (0xA1)   // device->host, class, interface
+#define UAC2_MAX_SUBRANGES          (8)
+
 typedef struct {
     bool open;
     bool is_in;
@@ -102,6 +114,15 @@ typedef struct {
     uint8_t itf, alt, ep;
     uint16_t mps;
     uint32_t rate;
+    uint8_t clock, control;     // 2.0: the clock source and its interface; 0 for 1.0
+    // Playback packet sizing. `frame` is bytes per audio frame (channels x
+    // sample bytes); with it known, a packet carries the frames one
+    // millisecond holds at `rate`, the fraction carried in `acc`, rather
+    // than a full `mps`. Sending mps every interval to a sink whose maximum
+    // packet is a millisecond plus one frame (as 2.0 devices size them) runs
+    // 2 % fast, and the sink drops what it cannot hold.
+    uint16_t frame;
+    uint32_t acc;
     usb_transfer_t *xfer[USBIF_UAC_NUM_XFER];
     volatile uint8_t inflight;
     uint8_t ring[USBIF_UAC_RING];
@@ -162,7 +183,20 @@ static void usbif_uac_prepare(usb_transfer_t *xfer) {
     // it is a property of the allocation rather than of this submission.
     uint32_t total = 0;
     for (int i = 0; i < USBIF_UAC_PKTS_PER_XFER; i++) {
-        const uint32_t want = usbif_uach.mps;
+        uint32_t want = usbif_uach.mps;
+        if (!usbif_uach.is_in && usbif_uach.frame && usbif_uach.rate) {
+            // One millisecond of audio per packet, the remainder carried:
+            // 44.1 kHz sends 44 frames then 45 in the right proportion. The
+            // host is full-speed today (usbif#3 parks the P4's), so the
+            // interval is a millisecond.
+            usbif_uach.acc += usbif_uach.rate;
+            const uint32_t frames = usbif_uach.acc / 1000;
+            usbif_uach.acc -= frames * 1000;
+            want = frames * usbif_uach.frame;
+            if (want > usbif_uach.mps) {
+                want = usbif_uach.mps;
+            }
+        }
         if (!usbif_uach.is_in) {
             // Playback always sends a full packet. Where the ring is short,
             // the remainder is silence -- an underrun in audio is silence,
@@ -263,10 +297,14 @@ static void usbif_uac_ctrl_cb(usb_transfer_t *xfer) {
     }
 }
 
-// One control transfer, synchronous: submit, pump until the callback fires,
-// free. Setup-only when payload is NULL.
-static int usbif_uac_control(uint8_t req_type, uint8_t request, uint16_t value,
-    uint16_t index, const uint8_t *payload, uint16_t len) {
+// One control transfer, synchronous: submit, wait for the callback, free.
+// Setup-only when payload is NULL. For a device-to-host request `rx` takes
+// what came back (at most `len` bytes; the count is written to `rx_len`).
+// `dev` is any handle the host holds, so this also serves a device this
+// driver has not opened as a stream -- the 2.0 rate query below.
+static int usbif_uac_control_on(usb_device_handle_t dev, uint8_t req_type, uint8_t request,
+    uint16_t value, uint16_t index, const uint8_t *payload, uint16_t len,
+    uint8_t *rx, uint16_t *rx_len) {
     usb_transfer_t *ctrl;
     if (usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + len, 0, &ctrl) != ESP_OK) {
         return -1;
@@ -280,7 +318,7 @@ static int usbif_uac_control(uint8_t req_type, uint8_t request, uint16_t value,
     if (payload && len) {
         memcpy(ctrl->data_buffer + sizeof(usb_setup_packet_t), payload, len);
     }
-    ctrl->device_handle = usbif_uach.dev;
+    ctrl->device_handle = dev;
     ctrl->bEndpointAddress = 0;
     ctrl->num_bytes = sizeof(usb_setup_packet_t) + len;
     ctrl->callback = usbif_uac_ctrl_cb;
@@ -328,8 +366,27 @@ static int usbif_uac_control(uint8_t req_type, uint8_t request, uint16_t value,
         return -3;
     }
     usbif_uac_ctrl_active = NULL;
+    int rc = (ctrl->status == USB_TRANSFER_STATUS_COMPLETED) ? 0 : -4;
+    if (rx && rx_len) {
+        // actual_num_bytes counts the setup packet too.
+        uint16_t got = 0;
+        if (rc == 0 && ctrl->actual_num_bytes > (int)sizeof(usb_setup_packet_t)) {
+            got = (uint16_t)(ctrl->actual_num_bytes - sizeof(usb_setup_packet_t));
+            if (got > len) {
+                got = len;
+            }
+            memcpy(rx, ctrl->data_buffer + sizeof(usb_setup_packet_t), got);
+        }
+        *rx_len = got;
+    }
     usb_host_transfer_free(ctrl);
-    return 0;
+    return rc;
+}
+
+static int usbif_uac_control(uint8_t req_type, uint8_t request, uint16_t value,
+    uint16_t index, const uint8_t *payload, uint16_t len) {
+    return usbif_uac_control_on(usbif_uach.dev, req_type, request, value, index,
+        payload, len, NULL, NULL);
 }
 
 // Tell the DEVICE to switch to the streaming alternate setting.
@@ -351,6 +408,16 @@ static int usbif_uac_set_interface(uint8_t itf, uint8_t alt) {
 // rate may STALL this, which is not fatal -- it is already running at the only
 // rate it has -- so the result is reported and not treated as failure.
 static int usbif_uac_set_rate(uint32_t rate) {
+    if (usbif_uach.clock) {
+        // 2.0: CUR on the clock source, four bytes.
+        uint8_t cur[4] = {
+            (uint8_t)(rate & 0xFF), (uint8_t)((rate >> 8) & 0xFF),
+            (uint8_t)((rate >> 16) & 0xFF), (uint8_t)((rate >> 24) & 0xFF),
+        };
+        return usbif_uac_control(UAC2_REQTYPE_SET_ITF, UAC2_CUR,
+            (uint16_t)(UAC2_CS_SAM_FREQ_CONTROL << 8),
+            (uint16_t)((usbif_uach.clock << 8) | usbif_uach.control), cur, 4);
+    }
     uint8_t payload[3] = {
         (uint8_t)(rate & 0xFF),
         (uint8_t)((rate >> 8) & 0xFF),
@@ -362,8 +429,55 @@ static int usbif_uac_set_rate(uint32_t rate) {
 
 // --- public API ---------------------------------------------------------
 
+// A 2.0 clock source's sampling-frequency ranges, as (min, max, res)
+// triplets into `out` (room for `max_triplets`). The device need not be
+// open as a stream; the host's own handle for it serves. Returns the count,
+// or negative: -1 no such device, -2 the request failed, -3 short answer.
+int usbif_host_uac_clock_ranges(uint32_t dev_id, uint8_t control_itf, uint8_t clock_id,
+    uint32_t *out, int max_triplets) {
+    usb_device_handle_t dev;
+    usbif_host_lock();
+    if (usbif_host_dev_lookup(dev_id, &dev) != 0) {
+        usbif_host_unlock();
+        return -1;
+    }
+    uint8_t rx[2 + 12 * UAC2_MAX_SUBRANGES];
+    uint16_t got = 0;
+    int rc = usbif_uac_control_on(dev, UAC2_REQTYPE_GET_ITF, UAC2_RANGE,
+        (uint16_t)(UAC2_CS_SAM_FREQ_CONTROL << 8),
+        (uint16_t)((clock_id << 8) | control_itf), NULL, sizeof(rx), rx, &got);
+    usbif_host_unlock();
+    if (rc != 0) {
+        return -2;
+    }
+    if (got < 2) {
+        return -3;
+    }
+    int n = rx[0] | (rx[1] << 8);
+    if (n > max_triplets) {
+        n = max_triplets;
+    }
+    if (n > UAC2_MAX_SUBRANGES) {
+        n = UAC2_MAX_SUBRANGES;
+    }
+    int filled = 0;
+    for (int i = 0; i < n; i++) {
+        const uint8_t *t = rx + 2 + 12 * i;
+        if (2 + 12 * (i + 1) > got) {
+            break;
+        }
+        for (int k = 0; k < 3; k++) {
+            const uint8_t *v = t + 4 * k;
+            out[3 * i + k] = (uint32_t)v[0] | ((uint32_t)v[1] << 8)
+                | ((uint32_t)v[2] << 16) | ((uint32_t)v[3] << 24);
+        }
+        filled++;
+    }
+    return filled;
+}
+
 static int usbif_host_uac_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
-    uint16_t mps, uint32_t rate) {
+    uint16_t mps, uint32_t rate, uint8_t clock, uint8_t control, uint16_t frame) {
     if (usbif_uach.open) {
         return -1;
     }
@@ -381,6 +495,10 @@ static int usbif_host_uac_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
     usbif_uach.ep = ep;
     usbif_uach.mps = mps;
     usbif_uach.rate = rate;
+    usbif_uach.clock = clock;
+    usbif_uach.control = control;
+    usbif_uach.frame = frame;
+    usbif_uach.acc = 0;
     usbif_uach.is_in = (ep & 0x80) != 0;
 
     // Claiming with the chosen alternate setting is what starts the device
@@ -443,9 +561,9 @@ static int usbif_host_uac_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
 }
 
 int usbif_host_uac_open(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
-    uint16_t mps, uint32_t rate) {
+    uint16_t mps, uint32_t rate, uint8_t clock, uint8_t control, uint16_t frame) {
     usbif_host_lock();
-    int r = usbif_host_uac_open_locked(dev_id, itf, alt, ep, mps, rate);
+    int r = usbif_host_uac_open_locked(dev_id, itf, alt, ep, mps, rate, clock, control, frame);
     usbif_host_unlock();
     return r;
 }

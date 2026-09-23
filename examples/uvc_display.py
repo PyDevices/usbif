@@ -40,8 +40,9 @@ app = appdev.App(board_config)
 
 # The camera's data endpoint is fed one packet per bus frame, so a mode is
 # only reachable if its negotiated payload fits the host's isochronous IN
-# limit. That limit is set by the DWC FIFO bias chosen at build time -- see
-# usbif#2 -- and is 600 bytes on the current firmware. Modes are tried
+# limit. That limit is set by the DWC FIFO split the host chooses from the
+# classes it is started for (usbif#2): a session asking for "uvc" gets the
+# IN-leaning split, 600 bytes. Modes are tried
 # largest-first and the first one the camera and the bus both accept wins.
 IN_LIMIT = 600
 

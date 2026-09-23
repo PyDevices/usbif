@@ -124,7 +124,12 @@ a decision rather than being assumed. See `docs/phase0-findings.md`,
 including the P4's SDMMC pin map (its `machine.SDCard()` needs explicit
 pins) and two rough edges in card initialisation.
 
-And the working host side carries honest limits for now: concurrent sessions are bounded by a
+And the working host side carries honest limits for now: the controller's
+FIFO split is fixed when the host starts, so `host(classes=...)` chooses it
+from what was asked for (`uvc` leans IN; `uac` without `uvc` makes room for a
+speaker's 196-byte packet and a microphone's; otherwise the board's Kconfig
+bias), and a camera and a USB Audio 2.0 speaker cannot share one `start()`;
+concurrent sessions are bounded by a
 *channel budget*, not by class -- the ESP32-S3 has eight host channels
 (`OTG_NUM_HOST_CHAN`), a bulk pair costs two and an interrupt IN costs
 one, and every device including a hub costs one for its control pipe.

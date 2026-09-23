@@ -20,6 +20,23 @@ have hardware volume can gain it later without changing what an application
 sees.
 """
 
+try:
+    from time import sleep_ms, ticks_add, ticks_diff, ticks_ms
+except ImportError:  # CPython, where the desktop backends and the tests run
+    import time as _time
+
+    def ticks_ms():
+        return int(_time.monotonic() * 1000)
+
+    def ticks_add(t, delta):
+        return t + delta
+
+    def ticks_diff(a, b):
+        return a - b
+
+    def sleep_ms(ms):
+        _time.sleep(ms / 1000)
+
 from audiodev import AudioFormat, PCMInput, PCMOutput
 
 from . import uac
@@ -54,10 +71,38 @@ def audio_devices(host_devices=None):
             blob = _usbif.host_desc(dev[0])
         except OSError:
             continue
-        streams = uac.streams(blob)
+        streams = _with_clock_rates(dev[0], uac.streams(blob))
         if streams:
             found.append((dev[0], streams))
     return tuple(found)
+
+
+def _with_clock_rates(dev_id, streams):
+    """Fill in the rates of USB Audio 2.0 streams.
+
+    A 2.0 stream's descriptors name a clock source and say nothing about
+    rates; the clock answers a RANGE request. One request per clock, and a
+    clock that will not answer leaves the stream with no rates, which
+    ``choose`` then declines rather than guessing.
+    """
+    out = []
+    asked = {}
+    rates_at = uac.STREAM_FIELDS.index("rates")
+    for s in streams:
+        if s.rates or not s.clock:
+            out.append(s)
+            continue
+        key = (s.control, s.clock)
+        if key not in asked:
+            try:
+                asked[key] = uac.rates_from_ranges(
+                    _usbif.host_uac_clock_ranges(dev_id, s.control, s.clock))
+            except OSError:
+                asked[key] = ()
+        fields = list(s)
+        fields[rates_at] = asked[key]
+        out.append(uac.UacStream(*fields))
+    return tuple(out)
 
 
 def _pick(dev_id, direction, rate, channels, bits):
@@ -79,7 +124,9 @@ class _UacHostMixin:
 
     def _uac_open(self, stream):
         _usbif.host_uac_open(self._dev_id, stream.interface, stream.alt,
-                             stream.endpoint, stream.max_packet, self._rate)
+                             stream.endpoint, stream.max_packet, self._rate,
+                             stream.clock, stream.control,
+                             stream.channels * stream.frame_bytes)
 
     def _close(self):
         _usbif.host_uac_close()
@@ -117,9 +164,18 @@ class UacHostOutput(_UacHostMixin, PCMOutput):
     def _write(self, buf):
         # Short writes are normal and not an error: the ring is finite and the
         # bus drains it in real time, so a caller writing faster than realtime
-        # is told how much was taken and comes back. That is the same
-        # backpressure contract the I2S adapter provides.
-        return _usbif.host_uac_write(buf)
+        # is told how much was taken and comes back. What is not allowed is
+        # taking nothing: ``PCMOutput.write`` treats a zero as a stream that
+        # has stopped. So a full ring waits here for the bus to drain some of
+        # it -- 8 KB goes in 43 ms at 48 kHz stereo -- and only a ring that
+        # stays full for far longer than that reports no progress, which then
+        # really does mean the transfers are not completing.
+        deadline = ticks_add(ticks_ms(), 500)
+        while True:
+            n = _usbif.host_uac_write(buf)
+            if n > 0 or ticks_diff(deadline, ticks_ms()) <= 0:
+                return n
+            sleep_ms(1)
 
     def queued_size(self):
         queued = _usbif.host_uac_queued()

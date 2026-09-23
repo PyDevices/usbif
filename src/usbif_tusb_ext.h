@@ -147,10 +147,20 @@
 #define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX (2)
 #define CFG_TUD_AUDIO_FUNC_1_RESOLUTION_RX (16)
 #define CFG_TUD_AUDIO_ENABLE_EP_OUT (1)
-#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX             \
-    TUD_AUDIO_EP_SIZE(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE, \
-    CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX,        \
-    CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX)
+// The endpoint's packet size is the FULL-speed figure at both speeds: one
+// millisecond of audio plus a sample (196 bytes for 48 kHz stereo 16-bit).
+// TinyUSB's TUD_AUDIO_EP_SIZE would give a high-speed build the
+// per-microframe figure, 28, and a high-speed build attached at full speed
+// -- the P4 behind the S3's host (usbif#28) -- then advertises a packet a
+// quarter the size the stream needs. The larger figure is legal at high
+// speed (anything to 1024 is), and the host simply sends smaller packets.
+// The software FIFO below keeps the per-speed packet in its arithmetic, so
+// the feedback regulator's target does not move.
+#define USBIF_AUDIO_FS_PACKET_SZ                                     \
+    (((CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE / 1000) + 1)             \
+     * CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX                    \
+     * CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX)
+#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX (USBIF_AUDIO_FS_PACKET_SZ)
 // Software FIFO ahead of the endpoint.
 //
 // Sized as TinyUSB's own examples size it, and deliberately small. An earlier
@@ -166,7 +176,10 @@
 // TinyUSB's guidance is a minimum of four frames to absorb jitter; the
 // example's multiplier keeps a little more than that.
 #define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ          \
-    ((TUD_OPT_HIGH_SPEED ? 32 : 4) * CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX)
+    ((TUD_OPT_HIGH_SPEED ? 32 : 4)                     \
+     * TUD_AUDIO_EP_SIZE(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE, \
+    CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX,        \
+    CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX))
 #define CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP (1)
 #define CFG_TUD_AUDIO_FUNC_1_N_AS_INT (1)
 #define CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ (64)
