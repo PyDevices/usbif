@@ -85,10 +85,13 @@ extern int usbif_host_desc_get(uint32_t dev_id, const uint8_t **out, uint16_t *l
 extern int usbif_host_uac_clock_ranges(uint32_t dev_id, uint8_t control_itf, uint8_t clock_id,
     uint32_t *out, int max_triplets);
 extern int usbif_host_uac_open(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
-    uint16_t mps, uint32_t rate, uint8_t clock, uint8_t control, uint16_t frame);
+    uint16_t mps, uint32_t rate, uint8_t clock, uint8_t control, uint16_t frame,
+    uint32_t ring_bytes);
 extern int usbif_host_uac_read(uint8_t *out, size_t max);
 extern int usbif_host_uac_write(const uint8_t *data, size_t len);
 extern int usbif_host_uac_queued(void);
+extern int usbif_host_uac_space(void);
+extern int usbif_host_uac_capacity(void);
 extern void usbif_host_uac_stats(uint32_t *packets, uint32_t *bytes, uint32_t *dropped,
     uint32_t *starved, uint32_t *errors, uint32_t *empty);
 extern void usbif_host_uac_close(void);
@@ -848,11 +851,13 @@ static mp_obj_t usbif_host_uac_open_py(size_t n_args, const mp_obj_t *args) {
         n_args > 5 ? (uint32_t)mp_obj_get_int(args[5]) : 0,
         n_args > 6 ? (uint8_t)mp_obj_get_int(args[6]) : 0,    // 2.0 clock source id
         n_args > 7 ? (uint8_t)mp_obj_get_int(args[7]) : 0,    // its AudioControl interface
-        n_args > 8 ? (uint16_t)mp_obj_get_int(args[8]) : 0);  // bytes per audio frame
+        n_args > 8 ? (uint16_t)mp_obj_get_int(args[8]) : 0,   // bytes per audio frame
+        n_args > 9 ? (uint32_t)mp_obj_get_int(args[9]) : 0);  // ring bytes, 0 = 8 KB
     if (rc != 0) {
         // Carry the driver's own code: -1 already open, -2 bad packet size,
         // -3 no such device, -4 alt 0 carries no endpoint, -5 claim refused,
-        // -6 transfer alloc failed, -7 nothing submitted.
+        // -6 transfer alloc failed, -7 nothing submitted, -8 no memory for
+        // the ring, -9 ring size out of range (two packets to 4 MB).
         if (rc == -5) {
             // IDF answers ESP_ERR_NOT_SUPPORTED to a claim whose endpoint
             // packet exceeds the FIFO the host was installed with, and says
@@ -871,7 +876,7 @@ static mp_obj_t usbif_host_uac_open_py(size_t n_args, const mp_obj_t *args) {
     mp_raise_OSError(MP_EOPNOTSUPP);
     #endif
 }
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_host_uac_open_obj, 5, 9, usbif_host_uac_open_py);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_host_uac_open_obj, 5, 10, usbif_host_uac_open_py);
 
 static mp_obj_t usbif_host_uac_read_py(mp_obj_t buf_in) {
     #if USBIF_HAVE_HOST
@@ -913,6 +918,27 @@ static mp_obj_t usbif_host_uac_queued_py(void) {
     #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uac_queued_obj, usbif_host_uac_queued_py);
+
+// Free room and total size of the stream's ring, in bytes; -1 when no stream
+// is open. A caller that must not block asks space() before it writes
+// (usbif#36), rather than hardcoding a size the ring no longer has.
+static mp_obj_t usbif_host_uac_space_py(void) {
+    #if USBIF_HAVE_HOST
+    return MP_OBJ_NEW_SMALL_INT(usbif_host_uac_space());
+    #else
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uac_space_obj, usbif_host_uac_space_py);
+
+static mp_obj_t usbif_host_uac_capacity_py(void) {
+    #if USBIF_HAVE_HOST
+    return MP_OBJ_NEW_SMALL_INT(usbif_host_uac_capacity());
+    #else
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uac_capacity_obj, usbif_host_uac_capacity_py);
 
 // (packets, bytes, dropped, starved, errors). When a stream sounds wrong the
 // first question is whether bytes are being lost and where, and these
@@ -1671,6 +1697,8 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_uac_read), MP_ROM_PTR(&usbif_host_uac_read_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_write), MP_ROM_PTR(&usbif_host_uac_write_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_queued), MP_ROM_PTR(&usbif_host_uac_queued_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uac_space), MP_ROM_PTR(&usbif_host_uac_space_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uac_capacity), MP_ROM_PTR(&usbif_host_uac_capacity_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_stats), MP_ROM_PTR(&usbif_host_uac_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_clock_ranges), MP_ROM_PTR(&usbif_host_uac_clock_ranges_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_close), MP_ROM_PTR(&usbif_host_uac_close_obj) },

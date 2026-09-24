@@ -1475,10 +1475,18 @@ class FakeUacUsbif:
             raise OSError("no such device")
         return self.blob
 
-    def host_uac_open(self, dev_id, itf, alt, ep, mps, rate=0, clock=0, control=0, frame=0):
+    def host_uac_open(self, dev_id, itf, alt, ep, mps, rate=0, clock=0, control=0, frame=0,
+                      ring=0):
         self.opened = (dev_id, itf, alt, ep, mps, rate)
         # The 2.0 arguments, kept apart so the 1.0 assertions above read as before.
         self.opened_2_0 = (clock, control, frame)
+        self.ring = ring or 8192
+
+    def host_uac_space(self):
+        return self.ring - len(self.written)
+
+    def host_uac_capacity(self):
+        return self.ring
 
     # A 2.0 clock source's answer: one discrete rate unless a test sets
     # ``ranges``; ``ranges_asked`` records (dev_id, control, clock).
@@ -1635,6 +1643,33 @@ class TestUacAudioSelection(unittest.TestCase):
         self.assertEqual(device.direction, "out")
         self.assertIn("playback", device.capabilities)
         self.assertIn("volume", device.capabilities)
+
+    def test_ring_ms_sizes_the_ring_in_whole_frames(self):
+        # usbif#36: the caller chooses how long a stall the stream rides out.
+        fake = self._install(_uac2_blob())
+        out = self.mod.output(4, ring_ms=2000)
+        out.open()
+        self.assertEqual(fake.ring, 48000 * 2 * 4)     # 2 s of 48 kHz stereo 16-bit
+        self.assertEqual(out.capacity(), 48000 * 2 * 4)
+        out.close()
+
+    def test_no_ring_ms_leaves_the_driver_default(self):
+        fake = self._install(_uac2_blob())
+        out = self.mod.output(4)
+        out.open()
+        self.assertEqual(fake.ring, 8192)
+        out.close()
+
+    def test_space_is_whole_frames_and_try_write_never_waits(self):
+        fake = self._install(_uac2_blob())
+        out = self.mod.output(4)
+        out.open()
+        fake.ring = 4 * 10 + 3              # a driver answering an odd room
+        self.assertEqual(out.space(), 40)
+        # A full ring: try_write returns 0 at once rather than waiting 500 ms.
+        fake.host_uac_write = lambda data: 0
+        self.assertEqual(out.try_write(bytes(8)), 0)
+        out.close()
 
     def test_writes_report_what_was_accepted(self):
         fake = self._install()

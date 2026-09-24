@@ -50,6 +50,7 @@ target_sources(usermod_usbif INTERFACE
     ${USBIF_SRC_DIR}/usbif_msc_dev.c
     ${USBIF_SRC_DIR}/usbif_uvc_dev.c
     ${USBIF_SRC_DIR}/shared/usbif_ringbuf.c
+    ${USBIF_SRC_DIR}/shared/usbif_byte_ring.c
     ${USBIF_SRC_DIR}/shared/usbif_midi_packet.c
 )
 
@@ -66,6 +67,12 @@ if(ESP_PLATFORM)
     if(usbif_tusb_lib)
         target_include_directories(${usbif_tusb_lib} PRIVATE ${USBIF_SRC_DIR})
     endif()
+    # The IDF defines ESP_PLATFORM for its own components but not for a user C
+    # module, and FreeRTOS's ESP-IDF trace-macro defaults sit behind it: on the
+    # S3 (Xtensa) portYIELD_FROM_ISR in usbif_i2s.c then fails to compile with
+    # an implicit traceISR_EXIT_TO_SCHEDULER. Kitchen-sink builds never saw it
+    # because another module's glue defines it; usbif built on its own did.
+    target_compile_definitions(usermod_usbif INTERFACE ESP_PLATFORM=1)
 endif()
 
 target_link_libraries(usermod INTERFACE usermod_usbif)

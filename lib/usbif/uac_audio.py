@@ -119,6 +119,23 @@ def _pick(dev_id, direction, rate, channels, bits):
     raise ValueError("device {} is not a hosted audio device".format(dev_id))
 
 
+def _ring_bytes(stream, rate, ring_ms):
+    """The ring size ``ring_ms`` asks for, in whole frames; 0 is the default.
+
+    The default is the driver's 8 KB, 43 ms of 48 kHz stereo. That is enough
+    for a caller that services the stream from its own tight loop and not
+    enough for one on the interpreter thread of an app that also draws a UI
+    or talks to the network (usbif#36): ask for the longest stall the app
+    has, with room over. Two seconds of 48 kHz stereo is 375 KB, and a ring
+    that size lives in PSRAM.
+    """
+    if ring_ms is None:
+        return 0
+    frame = stream.channels * stream.frame_bytes
+    frames = (int(rate or 48000) * int(ring_ms) + 999) // 1000
+    return max(1, frames) * frame
+
+
 class _UacHostMixin:
     """Shared open/close over the native UAC host driver."""
 
@@ -126,7 +143,8 @@ class _UacHostMixin:
         _usbif.host_uac_open(self._dev_id, stream.interface, stream.alt,
                              stream.endpoint, stream.max_packet, self._rate,
                              stream.clock, stream.control,
-                             stream.channels * stream.frame_bytes)
+                             stream.channels * stream.frame_bytes,
+                             _ring_bytes(stream, self._rate, self._ring_ms))
 
     def _close(self):
         _usbif.host_uac_close()
@@ -136,8 +154,12 @@ class _UacHostMixin:
         """The `usbif.uac.UacStream` this device is running."""
         return self._stream
 
+    def capacity(self):
+        """The ring's size in bytes, as opened; 0 while closed."""
+        return max(0, _usbif.host_uac_capacity())
+
     def stats(self):
-        """``(packets, bytes, dropped, starved, errors)`` from the driver.
+        """``(packets, bytes, dropped, starved, errors, empty)`` from the driver.
 
         Separated on purpose. A stream that sounds wrong is nearly always one
         of three things, and lumping them together loses the answer: the ring
@@ -149,14 +171,20 @@ class _UacHostMixin:
 
 
 class UacHostOutput(_UacHostMixin, PCMOutput):
-    """A hosted USB speaker or audio interface, as a ``PCMOutput``."""
+    """A hosted USB speaker or audio interface, as a ``PCMOutput``.
 
-    def __init__(self, dev_id, stream, rate, **kwargs):
+    ``ring_ms`` sizes the ring between this object and the bus; see
+    `output`. `space` says how much a write can take right now, so a caller
+    that must not block never has to.
+    """
+
+    def __init__(self, dev_id, stream, rate, *, ring_ms=None, **kwargs):
         PCMOutput.__init__(self, AudioFormat(rate, stream.channels, stream.bits),
                            **kwargs)
         self._dev_id = dev_id
         self._stream = stream
         self._rate = rate
+        self._ring_ms = ring_ms
 
     def _open(self):
         self._uac_open(self._stream)
@@ -167,7 +195,7 @@ class UacHostOutput(_UacHostMixin, PCMOutput):
         # is told how much was taken and comes back. What is not allowed is
         # taking nothing: ``PCMOutput.write`` treats a zero as a stream that
         # has stopped. So a full ring waits here for the bus to drain some of
-        # it -- 8 KB goes in 43 ms at 48 kHz stereo -- and only a ring that
+        # it -- a packet's worth every millisecond -- and only a ring that
         # stays full for far longer than that reports no progress, which then
         # really does mean the transfers are not completing.
         deadline = ticks_add(ticks_ms(), 500)
@@ -177,6 +205,19 @@ class UacHostOutput(_UacHostMixin, PCMOutput):
                 return n
             sleep_ms(1)
 
+    def try_write(self, buf):
+        """Take what fits now and return at once; never waits for the bus."""
+        self.open()
+        source = self._prepare(buf)
+        return max(0, _usbif.host_uac_write(source))
+
+    def space(self):
+        """Bytes a write can take without coming up short, in whole frames."""
+        room = _usbif.host_uac_space()
+        if room <= 0:
+            return 0
+        return room - room % self.format.frame_size
+
     def queued_size(self):
         queued = _usbif.host_uac_queued()
         return max(0, queued)
@@ -185,12 +226,13 @@ class UacHostOutput(_UacHostMixin, PCMOutput):
 class UacHostInput(_UacHostMixin, PCMInput):
     """A hosted USB microphone, as a ``PCMInput``."""
 
-    def __init__(self, dev_id, stream, rate, **kwargs):
+    def __init__(self, dev_id, stream, rate, *, ring_ms=None, **kwargs):
         PCMInput.__init__(self, AudioFormat(rate, stream.channels, stream.bits),
                           **kwargs)
         self._dev_id = dev_id
         self._stream = stream
         self._rate = rate
+        self._ring_ms = ring_ms
 
     def _open(self):
         self._uac_open(self._stream)
@@ -199,23 +241,29 @@ class UacHostInput(_UacHostMixin, PCMInput):
         return _usbif.host_uac_read(buf)
 
 
-def output(dev_id, *, rate=None, channels=None, bits=None, **kwargs):
+def output(dev_id, *, rate=None, channels=None, bits=None, ring_ms=None, **kwargs):
     """Open a hosted USB audio device for playback.
 
     ``rate``/``channels``/``bits`` filter the device's offered formats; asking
     for something it does not offer raises, listing what it does offer, rather
     than quietly substituting the nearest. Starting a stream at a rate the
     caller did not ask for is how a pitch bug gets shipped.
+
+    ``ring_ms`` is how much audio the driver holds between your writes and
+    the bus. Leave it out for the 8 KB default (about 43 ms), which suits a
+    loop that does nothing else. An app that feeds the stream from the
+    interpreter thread while it also draws or talks to the network should ask
+    for longer than its longest stall, for example ``ring_ms=2000``.
     """
     _require()
     stream = _pick(dev_id, uac.OUT, rate, channels, bits)
     chosen = rate if rate is not None else (max(stream.rates) if stream.rates else 0)
-    return UacHostOutput(dev_id, stream, chosen, **kwargs)
+    return UacHostOutput(dev_id, stream, chosen, ring_ms=ring_ms, **kwargs)
 
 
-def input(dev_id, *, rate=None, channels=None, bits=None, **kwargs):  # noqa: A001
-    """Open a hosted USB audio device for capture."""
+def input(dev_id, *, rate=None, channels=None, bits=None, ring_ms=None, **kwargs):  # noqa: A001
+    """Open a hosted USB audio device for capture. ``ring_ms`` as for `output`."""
     _require()
     stream = _pick(dev_id, uac.IN, rate, channels, bits)
     chosen = rate if rate is not None else (max(stream.rates) if stream.rates else 0)
-    return UacHostInput(dev_id, stream, chosen, **kwargs)
+    return UacHostInput(dev_id, stream, chosen, ring_ms=ring_ms, **kwargs)

@@ -40,7 +40,11 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
+#include "esp_memory_utils.h"
 #include "usb/usb_host.h"
+
+#include "shared/usbif_byte_ring.h"
 
 extern usb_host_client_handle_t usbif_host_client_get(void);
 extern void usbif_host_lock(void);
@@ -58,7 +62,19 @@ extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
 #define USBIF_UAC_PKTS_PER_XFER (8)
 #define USBIF_UAC_NUM_XFER      (3)
 #define USBIF_UAC_MAX_MPS       (256)
-#define USBIF_UAC_RING          (8192)
+// The ring between Python and the bus. Its size is the caller's (usbif#36):
+// the default is the 8 KB this driver always had, 43 ms of 48 kHz stereo,
+// which an interpreter busy with a UI redraw or a Web API call outlasts. A
+// caller that feeds the stream from the interpreter thread asks for seconds.
+// Up to USBIF_UAC_RING_INTERNAL the ring prefers internal RAM, which is the
+// scarcer pool but the faster one; above it, PSRAM, because 2 s of 48 kHz
+// stereo is 375 KB and internal RAM on an S3 holds about 300 KB in all.
+// Either falls back to the other. It is never the MicroPython heap: the
+// transfers keep reading the ring from the host task after a soft reset has
+// wiped that heap, until something closes the stream.
+#define USBIF_UAC_RING_DEFAULT  (8192)
+#define USBIF_UAC_RING_INTERNAL (16384)
+#define USBIF_UAC_RING_MAX      (4u * 1024u * 1024u)
 
 // How long a control transfer may take to be *retired*, which is not the same
 // as how long the device takes to answer. EP0 is shared, and a hub enumerating
@@ -125,8 +141,8 @@ typedef struct {
     uint32_t acc;
     usb_transfer_t *xfer[USBIF_UAC_NUM_XFER];
     volatile uint8_t inflight;
-    uint8_t ring[USBIF_UAC_RING];
-    volatile uint32_t head, tail;
+    usbif_byte_ring_t ring;
+    uint8_t *ring_mem;
     // Diagnostics, same philosophy as the device-side UAC counters: when a
     // stream sounds wrong the first question is always whether bytes are
     // being lost, and where.
@@ -138,36 +154,49 @@ static usbif_uac_host_t usbif_uach;
 // --- ring ---------------------------------------------------------------
 //
 // Single producer, single consumer, no lock: on IN the callback writes and
-// Python reads; on OUT the reverse. head and tail are each written by exactly
-// one side, which is what makes that safe without a mutex on a single core.
+// Python reads; on OUT the reverse. The ring itself is shared/usbif_byte_ring,
+// tested on the host; this file only sizes and places its storage.
 
 static inline uint32_t usbif_uac_ring_used(void) {
-    return (usbif_uach.head - usbif_uach.tail) % USBIF_UAC_RING;
+    return usbif_byte_ring_used(&usbif_uach.ring);
 }
 
 static inline uint32_t usbif_uac_ring_free(void) {
-    return USBIF_UAC_RING - 1 - usbif_uac_ring_used();
+    return usbif_byte_ring_free(&usbif_uach.ring);
 }
 
 static void usbif_uac_ring_push(const uint8_t *data, uint32_t len) {
-    for (uint32_t i = 0; i < len; i++) {
-        uint32_t next = (usbif_uach.head + 1) % USBIF_UAC_RING;
-        if (next == usbif_uach.tail) {
-            usbif_uach.dropped++;
-            return;                 // drop the tail of this packet, not the ring
-        }
-        usbif_uach.ring[usbif_uach.head] = data[i];
-        usbif_uach.head = next;
+    if (usbif_byte_ring_push(&usbif_uach.ring, data, len) < len) {
+        usbif_uach.dropped++;       // the tail of this packet, not the ring
     }
 }
 
 static uint32_t usbif_uac_ring_pop(uint8_t *out, uint32_t max) {
-    uint32_t n = 0;
-    while (n < max && usbif_uach.tail != usbif_uach.head) {
-        out[n++] = usbif_uach.ring[usbif_uach.tail];
-        usbif_uach.tail = (usbif_uach.tail + 1) % USBIF_UAC_RING;
+    return usbif_byte_ring_pop(&usbif_uach.ring, out, max);
+}
+
+static bool usbif_uac_ring_alloc(uint32_t size) {
+    const uint32_t internal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    const uint32_t psram = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    const bool small = size <= USBIF_UAC_RING_INTERNAL;
+    uint8_t *mem = heap_caps_malloc(size, small ? internal : psram);
+    if (mem == NULL) {
+        mem = heap_caps_malloc(size, small ? psram : internal);
     }
-    return n;
+    if (mem == NULL) {
+        return false;
+    }
+    usbif_uach.ring_mem = mem;
+    usbif_byte_ring_init(&usbif_uach.ring, mem, size);
+    return true;
+}
+
+static void usbif_uac_ring_release(void) {
+    if (usbif_uach.ring_mem) {
+        heap_caps_free(usbif_uach.ring_mem);
+        usbif_uach.ring_mem = NULL;
+    }
+    usbif_byte_ring_init(&usbif_uach.ring, NULL, 0);
 }
 
 // --- transfer plumbing --------------------------------------------------
@@ -203,6 +232,11 @@ static void usbif_uac_prepare(usb_transfer_t *xfer) {
             // not a stall, and the stream must keep its slot on the bus.
             uint32_t have = usbif_uac_ring_used();
             uint32_t take = have < want ? have : want;
+            if (usbif_uach.frame) {
+                // Whole frames only: popping half a frame into a packet
+                // padded with silence would shift every sample after it.
+                take -= take % usbif_uach.frame;
+            }
             if (take) {
                 usbif_uac_ring_pop(xfer->data_buffer + total, take);
             }
@@ -477,12 +511,23 @@ int usbif_host_uac_clock_ranges(uint32_t dev_id, uint8_t control_itf, uint8_t cl
 }
 
 static int usbif_host_uac_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
-    uint16_t mps, uint32_t rate, uint8_t clock, uint8_t control, uint16_t frame) {
+    uint16_t mps, uint32_t rate, uint8_t clock, uint8_t control, uint16_t frame,
+    uint32_t ring_bytes) {
     if (usbif_uach.open) {
         return -1;
     }
     if (mps == 0 || mps > USBIF_UAC_MAX_MPS) {
         return -2;
+    }
+    if (ring_bytes == 0) {
+        ring_bytes = USBIF_UAC_RING_DEFAULT;
+    }
+    if (frame) {
+        // Whole frames, so a write the ring cuts short never splits one.
+        ring_bytes -= ring_bytes % frame;
+    }
+    if (ring_bytes < (uint32_t)mps * 2 || ring_bytes > USBIF_UAC_RING_MAX) {
+        return -9;
     }
     usb_device_handle_t dev;
     if (usbif_host_dev_lookup(dev_id, &dev) != 0) {
@@ -508,10 +553,14 @@ static int usbif_host_uac_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
     if (alt == 0) {
         return -4;
     }
+    if (!usbif_uac_ring_alloc(ring_bytes)) {
+        return -8;
+    }
     esp_err_t cerr = usb_host_interface_claim(usbif_host_client_get(), dev, itf, alt);
     printf("usbif_uac: interface_claim(itf=%u alt=%u) -> 0x%x\n",
         (unsigned)itf, (unsigned)alt, (unsigned)cerr);
     if (cerr != ESP_OK) {
+        usbif_uac_ring_release();
         return -5;
     }
     int sif = usbif_uac_set_interface(itf, alt);
@@ -528,14 +577,17 @@ static int usbif_host_uac_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
                 usbif_uach.xfer[j] = NULL;
             }
             usb_host_interface_release(usbif_host_client_get(), dev, itf);
+            usbif_uac_ring_release();
             return -6;
         }
         usbif_uach.xfer[i]->callback = usbif_uac_cb;
     }
 
     usbif_uach.open = true;
-    printf("usbif_uac: claimed itf %u alt %u ep 0x%02x mps %u rate %u\n",
-        (unsigned)itf, (unsigned)alt, (unsigned)ep, (unsigned)mps, (unsigned)rate);
+    printf("usbif_uac: claimed itf %u alt %u ep 0x%02x mps %u rate %u ring %u (%s)\n",
+        (unsigned)itf, (unsigned)alt, (unsigned)ep, (unsigned)mps, (unsigned)rate,
+        (unsigned)ring_bytes,
+        esp_ptr_external_ram(usbif_uach.ring_mem) ? "psram" : "internal");
     for (int i = 0; i < USBIF_UAC_NUM_XFER; i++) {
         usbif_uac_prepare(usbif_uach.xfer[i]);
         esp_err_t serr = usb_host_transfer_submit(usbif_uach.xfer[i]);
@@ -555,15 +607,18 @@ static int usbif_host_uac_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
             usbif_uach.xfer[i] = NULL;
         }
         usb_host_interface_release(usbif_host_client_get(), dev, itf);
+        usbif_uac_ring_release();
         return -7;
     }
     return 0;
 }
 
 int usbif_host_uac_open(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
-    uint16_t mps, uint32_t rate, uint8_t clock, uint8_t control, uint16_t frame) {
+    uint16_t mps, uint32_t rate, uint8_t clock, uint8_t control, uint16_t frame,
+    uint32_t ring_bytes) {
     usbif_host_lock();
-    int r = usbif_host_uac_open_locked(dev_id, itf, alt, ep, mps, rate, clock, control, frame);
+    int r = usbif_host_uac_open_locked(dev_id, itf, alt, ep, mps, rate, clock, control, frame,
+        ring_bytes);
     usbif_host_unlock();
     return r;
 }
@@ -579,14 +634,22 @@ int usbif_host_uac_write(const uint8_t *data, size_t len) {
     if (!usbif_uach.open || usbif_uach.is_in) {
         return -1;
     }
-    uint32_t room = usbif_uac_ring_free();
-    uint32_t n = (uint32_t)len < room ? (uint32_t)len : room;
-    usbif_uac_ring_push(data, n);
-    return (int)n;
+    // A short write is the caller's to retry, not a drop: no count here.
+    return (int)usbif_byte_ring_push(&usbif_uach.ring, data, (uint32_t)len);
 }
 
 int usbif_host_uac_queued(void) {
     return usbif_uach.open ? (int)usbif_uac_ring_used() : -1;
+}
+
+// Room for a write that will not be short, in bytes; -1 when closed.
+int usbif_host_uac_space(void) {
+    return usbif_uach.open ? (int)usbif_uac_ring_free() : -1;
+}
+
+// The ring's size in bytes, as opened; -1 when closed.
+int usbif_host_uac_capacity(void) {
+    return usbif_uach.open ? (int)usbif_uach.ring.size : -1;
 }
 
 void usbif_host_uac_stats(uint32_t *packets, uint32_t *bytes, uint32_t *dropped,
@@ -626,6 +689,10 @@ static void usbif_host_uac_close_locked(void) {
     // which matters on a full-speed bus where that reservation is the scarce
     // resource every other device is competing for.
     usb_host_interface_release(usbif_host_client_get(), usbif_uach.dev, usbif_uach.itf);
+    // Only once the transfers have retired: a callback still in flight pops
+    // from this storage. One that outlived the drain above returns early on
+    // `open` and never reaches the ring.
+    usbif_uac_ring_release();
 }
 
 void usbif_host_uac_close(void) {
