@@ -163,10 +163,10 @@
 // TinyUSB's TUD_AUDIO_EP_SIZE would give a high-speed build the
 // per-microframe figure, 28, and a high-speed build attached at full speed
 // -- the P4 behind the S3's host (usbif#28) -- then advertises a packet a
-// quarter the size the stream needs. The larger figure is legal at high
-// speed (anything to 1024 is), and the host simply sends smaller packets.
-// The software FIFO below keeps the per-speed packet in its arithmetic, so
-// the feedback regulator's target does not move.
+// quarter the size the stream needs. At high speed the descriptor assembler
+// also sets the endpoint's interval to one millisecond (usbif_desc.c,
+// usbif#37), so the host sends one packet of this size per millisecond at
+// both speeds rather than a small one every microframe.
 #define USBIF_AUDIO_FS_PACKET_SZ                                     \
     (((CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE / 1000) + 1)             \
      * CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX                    \

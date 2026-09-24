@@ -36,6 +36,9 @@
 #include "driver/i2s_std.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
+#include "esp_attr.h"
+#include <stdlib.h>
 
 #include "py/runtime.h"
 
@@ -112,11 +115,70 @@ void usbif_pump_notify(void) {
 static volatile bool usbif_pump_running;
 
 uint32_t usbif_pump_bytes;
+// What the I2S DMA actually consumed, counted in its own ISR: bytes sent,
+// buffers nobody collected (the send queue overflowed, so it played cleared,
+// silent buffers), and when counting started. Bytes over time is the rate the
+// codec is really being clocked at, independent of what the pump believes it
+// asked for (usbif#37). The starved count only sees a sink that gets nothing:
+// IDF's write gives up on a part-filled buffer when the queue is nearly full,
+// so a sink fed 80 % plays short buffers padded with silence and never
+// overflows. That case shows as pump bytes below DMA bytes.
+volatile uint32_t usbif_pump_dma_bytes;
+volatile uint32_t usbif_pump_dma_starved;
+int64_t usbif_pump_dma_t0;
+// A snapshot of the samples the pump hands to I2S, for measuring pitch
+// without ears: armed from Python, filled by the pump, read back whole.
+// Mono sinks only, which is every board that runs the pump today.
+// The buffer is taken from the heap on the first arm, so a board that never
+// asks pays nothing for it.
+#define USBIF_PUMP_TAP_N (8192)
+static int16_t *usbif_pump_tap_buf;
+static volatile uint32_t usbif_pump_tap_len = USBIF_PUMP_TAP_N;
 uint32_t usbif_pump_idle;
 uint32_t usbif_pump_timeouts;
 uint32_t usbif_pump_shed;
 
 #define USBIF_PUMP_HIGH_WATER (CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ * 3 / 4)
+
+static bool IRAM_ATTR usbif_pump_on_sent(i2s_chan_handle_t h, i2s_event_data_t *e, void *ctx) {
+    (void)h;
+    (void)ctx;
+    usbif_pump_dma_bytes += e->size;
+    return false;
+}
+
+static bool IRAM_ATTR usbif_pump_on_starved(i2s_chan_handle_t h, i2s_event_data_t *e, void *ctx) {
+    (void)h;
+    (void)e;
+    (void)ctx;
+    usbif_pump_dma_starved++;
+    return false;
+}
+
+// The captured samples once the tap is full, else NULL.
+const int16_t *usbif_pump_tap(uint32_t *n) {
+    if (usbif_pump_tap_buf && usbif_pump_tap_len >= USBIF_PUMP_TAP_N) {
+        *n = USBIF_PUMP_TAP_N;
+        return usbif_pump_tap_buf;
+    }
+    *n = 0;
+    return NULL;
+}
+
+int64_t usbif_pump_dma_elapsed_us(void) {
+    return esp_timer_get_time() - usbif_pump_dma_t0;
+}
+
+bool usbif_pump_tap_arm(void) {
+    if (!usbif_pump_tap_buf) {
+        usbif_pump_tap_buf = malloc(USBIF_PUMP_TAP_N * sizeof(int16_t));
+        if (!usbif_pump_tap_buf) {
+            return false;
+        }
+    }
+    usbif_pump_tap_len = 0;
+    return true;
+}
 
 static void usbif_pump_task(void *arg) {
     (void)arg;
@@ -233,6 +295,14 @@ static void usbif_pump_task(void *arg) {
         }
         if (out_bytes == 0) {
             continue;
+        }
+        if (usbif_pump_tap_len < USBIF_PUMP_TAP_N && usbif_sink_channels == 1) {
+            const int16_t *o = (const int16_t *)(void *)block;
+            uint32_t k = usbif_pump_tap_len;
+            for (uint16_t i = 0; i < out_bytes / 2 && k < USBIF_PUMP_TAP_N; i++) {
+                usbif_pump_tap_buf[k++] = o[i];
+            }
+            usbif_pump_tap_len = k;
         }
 
         size_t written = 0;
@@ -358,6 +428,16 @@ int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
     };
 
     err = i2s_channel_init_std_mode(usbif_i2s_tx, &std_cfg);
+    if (err == ESP_OK) {
+        const i2s_event_callbacks_t cbs = {
+            .on_sent = usbif_pump_on_sent,
+            .on_send_q_ovf = usbif_pump_on_starved,
+        };
+        err = i2s_channel_register_event_callback(usbif_i2s_tx, &cbs, NULL);
+    }
+    usbif_pump_dma_bytes = 0;
+    usbif_pump_dma_starved = 0;
+    usbif_pump_dma_t0 = esp_timer_get_time();
     if (err == ESP_OK) {
         err = i2s_channel_enable(usbif_i2s_tx);
     }
