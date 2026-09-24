@@ -3,8 +3,8 @@
 #
 # Point USER_C_MODULES at this repo (or this file) directly, e.g.:
 #   idf.py build -DUSER_C_MODULES=<path to usbif>/micropython.cmake
-# Or let the workspace aggregator's own micropython.cmake discover it
-# alongside other usermods.
+# Or add one line to your own manifest.py, which names this module via c_module():
+#   include("<path to usbif>/manifest.py")
 
 set(USBIF_MOD_DIR ${CMAKE_CURRENT_LIST_DIR})
 set(USBIF_SRC_DIR ${USBIF_MOD_DIR}/src)
