@@ -101,7 +101,12 @@ ESP32-S3 with its picture on the board's own panel (`src/usbif_host_uvc.c`,
 from a camera where the board has one, colour bars where it does not. Host
 audio plays too: the isochronous stall that blocked it was a
 `pdMS_TO_TICKS()` rounding to zero ticks at `CONFIG_FREERTOS_HZ=100`, so a
-delay that read as 5 ms never yielded at all.
+delay that read as 5 ms never yielded at all. If your app feeds a hosted
+speaker from the interpreter thread while it also draws or talks to the
+network, open it with `uac_audio.output(dev, ring_ms=2000)` and write what
+`space()` says fits: a 2 s ring (in PSRAM) rode out 1.2 s stalls on an S3
+with no gap, where the default 8 KB ring gapped 5,300 times in 20 s
+([#36](https://github.com/PyDevices/usbif/issues/36)).
 
 **Not yet working, said precisely:** macOS
 desktop support, which sits at the [community-verified
@@ -294,6 +299,7 @@ rather than a reflash:
 
 ```bash
 cc -std=c11 -Wall -Wextra -Werror -Isrc -o /tmp/test_ringbuf tests/test_ringbuf.c src/shared/usbif_ringbuf.c && /tmp/test_ringbuf
+cc -std=c11 -Wall -Wextra -Werror -Isrc -o /tmp/test_byte_ring tests/test_byte_ring.c src/shared/usbif_byte_ring.c && /tmp/test_byte_ring
 ```
 
 The portable API's conformance suite lives with the API, in this repository
