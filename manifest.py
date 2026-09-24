@@ -24,5 +24,5 @@
 # ``events``, which lives in pydevices and is installed by mip.
 package("usbif", base_path="lib", opt=3)
 
-# MicroPython 1.29: the manifest names its own C module (workspace retool, piece 1).
+# MicroPython 1.29: the manifest names its own C module.
 c_module(".")  # this directory holds the micropython.cmake / micropython.mk for the C half

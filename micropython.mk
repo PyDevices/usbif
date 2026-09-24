@@ -1,8 +1,9 @@
 # MicroPython Make-based build glue for usbif (unix, windows).
 # For CMake-based ports (esp32, rp2, …), see micropython.cmake in this dir.
 #
-# Discovered via USER_C_MODULES pointing at the workspace directory that
-# contains this repo (its parent) — see the workspace's build_mp.sh.
+# Named by c_module() in this repo's manifest.py (MicroPython 1.29+): add
+#   include("<path to usbif>/manifest.py")
+# to your manifest, or point USER_C_MODULES at this directory.
 
 USBIF_MOD_DIR := $(USERMOD_DIR)
 USBIF_SRC_DIR := $(USBIF_MOD_DIR)/src

@@ -1038,7 +1038,7 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uvc_close_obj, usbif_host_uvc_close_
 // usbif_uvc_dev.c is compiled only by the CMake ports, so on a Makefile port
 // (unix, and anything else building through micropython.mk) these symbols do
 // not exist. Referencing them unconditionally linked fine on esp32 and broke
-// the unix aggregator build with five undefined references -- a shape worth
+// the unix build with five undefined references -- a shape worth
 // remembering, because the port that fails is the one the module is not
 // really "for", and so is the one nobody runs first.
 #if defined(CFG_TUD_VIDEO) && CFG_TUD_VIDEO
