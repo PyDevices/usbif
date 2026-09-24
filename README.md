@@ -198,29 +198,51 @@ silence, because the mechanism it replaces failed silently.
 
 ## Building
 
-The module follows the standard MicroPython external C module contract, and
-`micropython.mk` covers the Make-based ports. Two steps come first, though,
-and skipping them builds a module whose USB functions are silently absent
-rather than one that fails loudly:
+usbif does its work on the ESP32-S2, S3 and P4, the parts with a USB OTG
+controller; the CMake glue skips every other esp32 part and rp2. Two steps come
+first, and skipping them builds a module whose USB functions are silently
+absent rather than one that fails loudly:
 
-1. **Apply the patches.** The device functions reach the host through hooks
-   this module adds to MicroPython's shared TinyUSB glue, and the host side
-   needs the esp32 OTG helper:
+1. **Apply the patches** to your MicroPython tree. The device functions reach
+   the host through hooks this module adds to MicroPython's shared TinyUSB
+   glue, and the host side needs the esp32 OTG helper. All four apply to
+   MicroPython v1.29.0:
 
    ```bash
-   ./apply_patches.sh --apply      # --status to check, --revert to undo
+   /path/to/usbif/apply_patches.sh --apply /path/to/micropython   # --status to check, --revert to undo
    ```
 
 2. **Point the board at the extension header**, by adding this line to your
-   board's `mpconfigboard.h` (see `patches/` for the ESP32_GENERIC_P4 and
-   ESP32_GENERIC_S3 versions, which are carried as board patches because the
-   line is board integration rather than module code):
+   board's `mpconfigboard.h`. It is board integration rather than module code;
+   the esp32 boards in
+   [micropython-pydevices](https://github.com/PyDevices/micropython-pydevices)
+   already carry it, if you would rather start from one of those:
 
    ```c
    #define MICROPY_HW_USB_EXT_TUSB_CONFIG "usbif_tusb_ext.h"
    ```
 
-Then build as usual:
+Then, on MicroPython 1.29 or later, add one line to the manifest your board
+build already uses (usually `ports/esp32/boards/manifest.py`, unless your board
+brings its own):
+
+```python
+include("/path/to/usbif/manifest.py")
+```
+
+and build as usual. That line brings both halves: it names the C module
+(`_usbif`) and freezes the `usbif` Python package from `lib/`. The package
+imports `events`, which comes from
+[pydevices](https://github.com/PyDevices/pydevices) by `mip`, so install that
+on the board too. If you would rather pass a manifest of your own as
+`FROZEN_MANIFEST=`, it replaces the port's default, so give it
+`include("$(PORT_DIR)/boards/manifest.py")` as well or you lose `asyncio` and
+the port's other frozen modules.
+
+On MicroPython older than 1.29, manifests have no `c_module()`, so this one
+will not load. Use the `USER_C_MODULES` flag, and freeze `lib/usbif` yourself
+(`package("usbif", base_path="/path/to/usbif/lib")` in your manifest) or copy
+it to the board:
 
 ```bash
 idf.py -D MICROPY_BOARD=ESP32_GENERIC_S3 -D USER_C_MODULES=/path/to/usbif/micropython.cmake build
