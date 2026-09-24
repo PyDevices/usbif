@@ -142,7 +142,18 @@
 // plays happily on an ordinary device -- the file was fine, the sink was odd.
 // The host now sees a conventional endpoint and the conversion to the board's
 // hardware happens in usbif's pump, where it belongs.
+//
+// 44.1 kHz is offered beside it (usbif#35). A source whose audio is natively
+// 44.1 kHz -- a Vorbis or CD stream -- would otherwise have to resample
+// before the bus, and on a small host that is the busiest thread it has.
+// 48 kHz stays the rate the device reports until a host asks for another,
+// so a host that never looks at the range sees what it always saw. The
+// endpoint is sized from the larger rate (the MAX below), which covers both.
+// Listed ascending, as UAC2 requires of a RANGE reply.
 #define CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE (48000)
+#define USBIF_UAC_DEFAULT_RATE (48000)
+#define USBIF_UAC_RATES { 44100, 48000 }
+#define USBIF_UAC_N_RATES (2)
 #define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX (2)
 #define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX (2)
 #define CFG_TUD_AUDIO_FUNC_1_RESOLUTION_RX (16)

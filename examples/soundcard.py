@@ -30,8 +30,11 @@ import time
 import board_peripherals as bp
 import usbif.auto
 
-# Host advertises 48 kHz stereo; the board codec is typically 24 kHz mono.
-# The C pump decimates. Match the board's own rate so pitch is right.
+# The host sees 48 kHz stereo by default and may choose 44.1 kHz instead;
+# the board codec is typically 24 kHz mono. The C pump decimates by the ratio
+# between the board rate and 48 kHz, and follows a 44.1 kHz host at the same
+# ratio (22.05 kHz on the wire), so neither side resamples. Pass the board's
+# own rate so pitch is right.
 DEFAULT_VOLUME = 85  # digital gain; 100 overdrives the P4 panel amp, 50 is barely audible
 
 
@@ -111,8 +114,11 @@ def main():
         while True:
             time.sleep_ms(1000)
             running, moved, idle, timeouts, shed = dev.uac_pump_stats()
-            print("pump running=%s bytes=%d idle=%d timeouts=%d shed=%d"
-                  % (running, moved, idle, timeouts, shed))
+            host_rate, wire_rate, _ = dev.uac_pump_rate()
+            print("pump running=%s host=%d wire=%d bytes=%d idle=%d "
+                  "timeouts=%d shed=%d"
+                  % (running, host_rate, wire_rate, moved, idle, timeouts,
+                     shed))
     except KeyboardInterrupt:
         print("stopping")
     finally:

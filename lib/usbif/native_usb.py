@@ -322,6 +322,11 @@ class NativeDevice(Device):
     def uac_pump_stats(self, *args):
         return _require().uac_pump_stats(*args)
 
+    def uac_pump_rate(self, *args):
+        """``(host_rate, wire_rate, retunes)``: the rate the host chose, the
+        rate the pump's I2S wire is clocked at, and how often it followed."""
+        return _require().uac_pump_rate(*args)
+
     def uac_available(self, *args):
         return _require().uac_available(*args)
 
