@@ -273,6 +273,21 @@ static void usbif_fixup_block(uint8_t *p, uint16_t len, int itf_delta) {
 // bulk endpoint at full speed fails it, so SET_CONFIGURATION stalls EP0 and
 // the device never enumerates: usbif#24, every costume with CDC in it. MIDI
 // used to be the one class patched this way, by compile-time address.
+//
+// The audio data endpoint also takes its interval for the speed: one packet
+// per millisecond at both. bInterval is an exponent at high speed, so 4 means
+// every eighth microframe, and 1 at full speed is every frame -- the same
+// cadence either way. It used to be 1 at both, which at high speed asks for
+// a packet every 125 us, and TinyUSB re-arms this endpoint from the
+// MicroPython task, through its scheduler. Whenever the interpreter took
+// longer than one microframe to get round to it, the next packet found the
+// endpoint unarmed and was lost: 20 % of them for long stretches, a third
+// under load. The pump then played what arrived back to back, so the music
+// came out a major third or more sharp, and rough where the gaps were
+// spliced (usbif#37). A millisecond gives the interpreter eight times the
+// room. It does not remove the dependence: see usbif#39.
+#define USBIF_UAC_HS_INTERVAL (4)
+
 static void usbif_renumber_endpoints(uint8_t *buf, uint16_t total, uint16_t bulk_mps) {
     uint8_t next_in = 1;
     uint8_t next_out = 1;
@@ -307,6 +322,7 @@ static void usbif_renumber_endpoints(uint8_t *buf, uint16_t total, uint16_t bulk
             num = next_out > next_in ? next_out : next_in;
             next_out = (uint8_t)(num + 1);
             audio_pair = num;
+            d[6] = (tud_speed_get() == TUSB_SPEED_HIGH) ? USBIF_UAC_HS_INTERVAL : 1;
         } else if (cur_class == TUSB_CLASS_AUDIO && cur_subclass == USBIF_AUDIO_SUBCLASS_STREAMING
                    && xfer == TUSB_XFER_ISOCHRONOUS && in && audio_pair != 0) {
             num = audio_pair;

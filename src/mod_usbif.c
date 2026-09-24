@@ -338,6 +338,11 @@ extern bool usbif_pump_is_running(void);
 extern uint32_t usbif_pump_bytes, usbif_pump_idle, usbif_pump_timeouts, usbif_pump_shed;
 extern uint32_t usbif_pump_retunes;
 extern uint32_t usbif_pump_wire_rate(void);
+extern volatile uint32_t usbif_pump_dma_bytes, usbif_pump_dma_starved;
+extern int64_t usbif_pump_dma_elapsed_us(void);
+extern const int16_t *usbif_pump_tap(uint32_t *n);
+extern bool usbif_pump_tap_arm(void);
+extern uint32_t usbif_uac_rx_packets, usbif_uac_rx_bytes;
 #endif
 
 // Diagnostic: what the host has actually asked the audio function for.
@@ -537,6 +542,47 @@ static mp_obj_t usbif_uac_pump_rate(void) {
     #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_pump_rate_obj, usbif_uac_pump_rate);
+
+// Diagnostic for usbif#37: (usb packets, usb bytes, i2s dma bytes, i2s
+// starved buffers, microseconds since the pump opened I2S).
+static mp_obj_t usbif_uac_pump_clock(void) {
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    mp_obj_t items[5] = {
+        mp_obj_new_int_from_uint(usbif_uac_rx_packets),
+        mp_obj_new_int_from_uint(usbif_uac_rx_bytes),
+        mp_obj_new_int_from_uint(usbif_pump_dma_bytes),
+        mp_obj_new_int_from_uint(usbif_pump_dma_starved),
+        mp_obj_new_int_from_ll(usbif_pump_dma_elapsed_us()),
+    };
+    return mp_obj_new_tuple(5, items);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_pump_clock_obj, usbif_uac_pump_clock);
+
+// uac_pump_tap(): the samples last captured going to I2S, as bytes (int16
+// mono), or None while a capture is still filling. uac_pump_tap(True) arms a
+// new capture.
+static mp_obj_t usbif_uac_pump_tap(size_t n_args, const mp_obj_t *args) {
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    if (n_args && mp_obj_is_true(args[0])) {
+        if (!usbif_pump_tap_arm()) {
+            mp_raise_type(&mp_type_MemoryError);
+        }
+        return mp_const_none;
+    }
+    uint32_t n;
+    const int16_t *p = usbif_pump_tap(&n);
+    if (!p) {
+        return mp_const_none;
+    }
+    return mp_obj_new_bytes((const byte *)p, n * 2);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_uac_pump_tap_obj, 0, 1, usbif_uac_pump_tap);
 
 // Diagnostic: (running, attaches, detaches, errors, lib_devices, lib_clients).
 static mp_obj_t usbif_host_stats(void) {
@@ -1608,6 +1654,8 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_uac_pump_stop), MP_ROM_PTR(&usbif_uac_pump_stop_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_stats), MP_ROM_PTR(&usbif_uac_pump_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_rate), MP_ROM_PTR(&usbif_uac_pump_rate_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uac_pump_clock), MP_ROM_PTR(&usbif_uac_pump_clock_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uac_pump_tap), MP_ROM_PTR(&usbif_uac_pump_tap_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_available), MP_ROM_PTR(&usbif_uac_available_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_volume), MP_ROM_PTR(&usbif_uac_volume_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_read), MP_ROM_PTR(&usbif_uac_read_obj) },
