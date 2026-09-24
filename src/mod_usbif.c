@@ -26,6 +26,7 @@
 #endif
 
 #include "usbif_classes.h"
+#include "pcm_c_sink.h"
 
 // From usbif_desc.c, present on any build with the TinyUSB extension
 // header. The USB identity is chosen at runtime from these bits.
@@ -92,6 +93,7 @@ extern int usbif_host_uac_write(const uint8_t *data, size_t len);
 extern int usbif_host_uac_queued(void);
 extern int usbif_host_uac_space(void);
 extern int usbif_host_uac_capacity(void);
+extern int usbif_host_uac_c_sink(pcm_c_sink_t *out, uint32_t channels, uint32_t bits);
 extern void usbif_host_uac_stats(uint32_t *packets, uint32_t *bytes, uint32_t *dropped,
     uint32_t *starved, uint32_t *errors, uint32_t *empty);
 extern void usbif_host_uac_close(void);
@@ -940,6 +942,27 @@ static mp_obj_t usbif_host_uac_capacity_py(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_host_uac_capacity_obj, usbif_host_uac_capacity_py);
 
+// host_uac_c_sink(channels, bits) -> bytes: the open playback stream's
+// pcm_c_sink_t, by value (usbif#43). Another native module copies it with
+// pcm_c_sink_copy() and writes to the stream from its own task. By value so
+// nothing a usermod keeps points into this heap; the sink's lifetime is the
+// stream's, enforced in C (shared/usbif_pcm_sink.h). OSError(EIO) when no
+// playback stream is open.
+static mp_obj_t usbif_host_uac_c_sink_py(mp_obj_t channels_in, mp_obj_t bits_in) {
+    #if USBIF_HAVE_HOST
+    pcm_c_sink_t sink;
+    if (usbif_host_uac_c_sink(&sink, (uint32_t)mp_obj_get_int(channels_in),
+        (uint32_t)mp_obj_get_int(bits_in)) != 0) {
+        mp_raise_OSError(MP_EIO);
+    }
+    return mp_obj_new_bytes((const byte *)&sink, sizeof(sink));
+    #else
+    (void)channels_in; (void)bits_in;
+    mp_raise_OSError(MP_EOPNOTSUPP);
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(usbif_host_uac_c_sink_obj, usbif_host_uac_c_sink_py);
+
 // (packets, bytes, dropped, starved, errors). When a stream sounds wrong the
 // first question is whether bytes are being lost and where, and these
 // separate the three answers: the ring overflowed because Python was late
@@ -1699,6 +1722,7 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_host_uac_queued), MP_ROM_PTR(&usbif_host_uac_queued_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_space), MP_ROM_PTR(&usbif_host_uac_space_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_capacity), MP_ROM_PTR(&usbif_host_uac_capacity_obj) },
+    { MP_ROM_QSTR(MP_QSTR_host_uac_c_sink), MP_ROM_PTR(&usbif_host_uac_c_sink_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_stats), MP_ROM_PTR(&usbif_host_uac_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_clock_ranges), MP_ROM_PTR(&usbif_host_uac_clock_ranges_obj) },
     { MP_ROM_QSTR(MP_QSTR_host_uac_close), MP_ROM_PTR(&usbif_host_uac_close_obj) },

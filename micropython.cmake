@@ -51,6 +51,7 @@ target_sources(usermod_usbif INTERFACE
     ${USBIF_SRC_DIR}/usbif_uvc_dev.c
     ${USBIF_SRC_DIR}/shared/usbif_ringbuf.c
     ${USBIF_SRC_DIR}/shared/usbif_byte_ring.c
+    ${USBIF_SRC_DIR}/shared/usbif_pcm_sink.c
     ${USBIF_SRC_DIR}/shared/usbif_midi_packet.c
 )
 

@@ -45,6 +45,8 @@
 #include "usb/usb_host.h"
 
 #include "shared/usbif_byte_ring.h"
+#include "shared/usbif_pcm_sink.h"
+#include "pcm_c_sink.h"
 
 extern usb_host_client_handle_t usbif_host_client_get(void);
 extern void usbif_host_lock(void);
@@ -150,6 +152,25 @@ typedef struct {
 } usbif_uac_host_t;
 
 static usbif_uac_host_t usbif_uach;
+
+// The playback ring's writers go through this gate (usbif#43), the
+// interpreter's and a usermod task's alike. It lives outside usbif_uach
+// because open() zeroes that, and the gate's generation count must survive
+// from one stream to the next: a sink issued for a stream that has closed
+// stays closed. See shared/usbif_pcm_sink.h for the guarantee.
+static usbif_pcm_sink_t usbif_uac_sink;
+static bool usbif_uac_sink_ready;
+
+static void usbif_uac_sink_wait(void) {
+    vTaskDelay(1);      // one real tick: lets a writer on this core finish
+}
+
+static void usbif_uac_sink_setup(void) {
+    if (!usbif_uac_sink_ready) {
+        usbif_pcm_sink_init(&usbif_uac_sink, &usbif_uach.ring, usbif_uac_sink_wait);
+        usbif_uac_sink_ready = true;
+    }
+}
 
 // --- ring ---------------------------------------------------------------
 //
@@ -584,6 +605,10 @@ static int usbif_host_uac_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
     }
 
     usbif_uach.open = true;
+    if (!usbif_uach.is_in) {
+        usbif_uac_sink_setup();
+        usbif_pcm_sink_open(&usbif_uac_sink, frame);
+    }
     printf("usbif_uac: claimed itf %u alt %u ep 0x%02x mps %u rate %u ring %u (%s)\n",
         (unsigned)itf, (unsigned)alt, (unsigned)ep, (unsigned)mps, (unsigned)rate,
         (unsigned)ring_bytes,
@@ -602,6 +627,9 @@ static int usbif_host_uac_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
     }
     if (usbif_uach.inflight == 0) {
         usbif_uach.open = false;
+        if (usbif_uac_sink_ready) {
+            usbif_pcm_sink_close(&usbif_uac_sink);
+        }
         for (int i = 0; i < USBIF_UAC_NUM_XFER; i++) {
             usb_host_transfer_free(usbif_uach.xfer[i]);
             usbif_uach.xfer[i] = NULL;
@@ -634,8 +662,45 @@ int usbif_host_uac_write(const uint8_t *data, size_t len) {
     if (!usbif_uach.open || usbif_uach.is_in) {
         return -1;
     }
-    // A short write is the caller's to retry, not a drop: no count here.
-    return (int)usbif_byte_ring_push(&usbif_uach.ring, data, (uint32_t)len);
+    // Through the gate, like a C sink's writes: a usermod's task may be
+    // writing too. A short write is the caller's to retry, not a drop.
+    return usbif_pcm_sink_write(&usbif_uac_sink, usbif_pcm_sink_current(&usbif_uac_sink),
+        data, len);
+}
+
+// --- the C sink (usbif#43) ------------------------------------------------
+//
+// What a usermod gets from UacHostOutput.c_sink(): pcm_c_sink.h's struct,
+// with this stream's generation as ctx. Both functions are safe from any
+// task and never block; once this stream closes they answer -1 for good.
+
+static int usbif_uac_c_write(void *ctx, const uint8_t *data, size_t len) {
+    return usbif_pcm_sink_write(&usbif_uac_sink, (uint32_t)(uintptr_t)ctx, data, len);
+}
+
+static int usbif_uac_c_space(void *ctx) {
+    return usbif_pcm_sink_space(&usbif_uac_sink, (uint32_t)(uintptr_t)ctx);
+}
+
+// Fill `out` for the playback stream open now. channels and bits come from
+// the caller (Python chose the format and knows them); rate and frame size
+// are the driver's own. 0, or -1 when no playback stream is open.
+int usbif_host_uac_c_sink(pcm_c_sink_t *out, uint32_t channels, uint32_t bits) {
+    uint32_t gen = usbif_uac_sink_ready ? usbif_pcm_sink_current(&usbif_uac_sink) : 0;
+    if (!usbif_uach.open || usbif_uach.is_in || gen == 0) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    out->magic = PCM_C_SINK_MAGIC;
+    out->version = PCM_C_SINK_VERSION;
+    out->ctx = (void *)(uintptr_t)gen;
+    out->write = usbif_uac_c_write;
+    out->space = usbif_uac_c_space;
+    out->rate = usbif_uach.rate;
+    out->channels = channels;
+    out->bits = bits;
+    out->frame_bytes = usbif_uach.frame;
+    return 0;
 }
 
 int usbif_host_uac_queued(void) {
@@ -644,6 +709,9 @@ int usbif_host_uac_queued(void) {
 
 // Room for a write that will not be short, in bytes; -1 when closed.
 int usbif_host_uac_space(void) {
+    if (usbif_uach.open && !usbif_uach.is_in) {
+        return usbif_pcm_sink_space(&usbif_uac_sink, usbif_pcm_sink_current(&usbif_uac_sink));
+    }
     return usbif_uach.open ? (int)usbif_uac_ring_free() : -1;
 }
 
@@ -674,6 +742,13 @@ static void usbif_host_uac_close_locked(void) {
     // falls when the host task delivers the completion callbacks, and this
     // lock is what keeps it out.
     int drain_held = usbif_host_lock_suspend();
+    // First the producers: a usermod's task may be inside a write right now,
+    // on the other core. This marks the sink closed and waits it out, so
+    // from here on nothing but the transfer callbacks can reach the ring
+    // (usbif#43, and the guarantee in shared/usbif_pcm_sink.h).
+    if (usbif_uac_sink_ready) {
+        usbif_pcm_sink_close(&usbif_uac_sink);
+    }
     const TickType_t drain_limit = USBIF_DELAY_TICKS(200);
     for (TickType_t i = 0; i < drain_limit && usbif_uach.inflight; i++) {
         vTaskDelay(1);
