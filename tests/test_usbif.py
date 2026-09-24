@@ -1514,6 +1514,13 @@ class FakeUacUsbif:
     def host_uac_stats(self):
         return (0, len(self.written), 0, 0, 0)
 
+    def host_uac_c_sink(self, channels, bits):
+        # Only an open playback stream has one: the driver raises otherwise.
+        if self.opened is None or self.opened[3] & 0x80 or self.closed:
+            raise OSError(5)
+        self.c_sink_asked = (channels, bits)
+        return b"PCMS" + bytes(52)
+
     def host_uac_close(self):
         self.closed += 1
 
@@ -1669,6 +1676,31 @@ class TestUacAudioSelection(unittest.TestCase):
         # A full ring: try_write returns 0 at once rather than waiting 500 ms.
         fake.host_uac_write = lambda data: 0
         self.assertEqual(out.try_write(bytes(8)), 0)
+        out.close()
+
+    def test_c_sink_opens_the_stream_and_passes_its_format(self):
+        # usbif#43: the struct itself is the driver's; what Python adds is
+        # opening the stream and telling C the format it chose.
+        fake = self._install(_uac2_blob())
+        out = self.mod.output(4)
+        self.assertFalse(out.is_open)
+        blob = out.c_sink()
+        self.assertTrue(out.is_open)
+        self.assertIsNotNone(fake.opened)
+        self.assertEqual(fake.c_sink_asked, (2, 16))
+        self.assertIsInstance(blob, bytes)
+        self.assertEqual(blob[:4], b"PCMS")
+        out.close()
+
+    def test_c_sink_after_close_is_a_new_open_not_a_stale_sink(self):
+        fake = self._install(_uac2_blob())
+        out = self.mod.output(4)
+        out.c_sink()
+        out.close()
+        self.assertEqual(fake.closed, 1)
+        fake.closed = 0
+        out.c_sink()                # reopens rather than handing back the old one
+        self.assertTrue(out.is_open)
         out.close()
 
     def test_writes_report_what_was_accepted(self):

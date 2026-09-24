@@ -222,6 +222,22 @@ class UacHostOutput(_UacHostMixin, PCMOutput):
         queued = _usbif.host_uac_queued()
         return max(0, queued)
 
+    def c_sink(self):
+        """This stream's C sink, as ``bytes``, for another native module.
+
+        A usermod that makes PCM on its own FreeRTOS task (earful, say)
+        copies this into a ``pcm_c_sink_t`` (``src/pcm_c_sink.h``, which it
+        vendors) and writes the stream from that task, so the interpreter no
+        longer moves the bytes (usbif#43). Opens the stream if it is not open.
+
+        The sink lasts as long as this open stream. Once `close` runs its
+        ``write`` and ``space`` return -1, and they keep doing so if the
+        stream is opened again: ask for a new sink then. Volume set here does
+        not apply to bytes written through it; the producer scales its own.
+        """
+        self.open()
+        return _usbif.host_uac_c_sink(self.format.channels, self.format.bits)
+
 
 class UacHostInput(_UacHostMixin, PCMInput):
     """A hosted USB microphone, as a ``PCMInput``."""

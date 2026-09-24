@@ -106,7 +106,12 @@ speaker from the interpreter thread while it also draws or talks to the
 network, open it with `uac_audio.output(dev, ring_ms=2000)` and write what
 `space()` says fits: a 2 s ring (in PSRAM) rode out 1.2 s stalls on an S3
 with no gap, where the default 8 KB ring gapped 5,300 times in 20 s
-([#36](https://github.com/PyDevices/usbif/issues/36)).
+([#36](https://github.com/PyDevices/usbif/issues/36)). If the audio is made
+in C by another native module, the interpreter need not carry it at all:
+`UacHostOutput.c_sink()` hands that module a sink it writes from its own
+task, described in [src/pcm_c_sink.h](src/pcm_c_sink.h)
+([#43](https://github.com/PyDevices/usbif/issues/43)). Not yet run on
+hardware.
 
 **Not yet working, said precisely:** macOS
 desktop support, which sits at the [community-verified

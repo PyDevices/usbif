@@ -9,7 +9,7 @@ jobs:
     # The event transport is the piece the whole host side rests on, and it
     # is testable without hardware: a failure here should be a two-second
     # answer on a runner rather than a reflash on someone's desk.
-    name: Host-testable C (ring buffers, MIDI packet codec)
+    name: Host-testable C (ring buffers, C sink, MIDI packet codec)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +23,34 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -Isrc \
              -o /tmp/test_byte_ring tests/test_byte_ring.c src/shared/usbif_byte_ring.c
           /tmp/test_byte_ring
+      - name: Build and run the C sink lifetime tests (usbif#43)
+        # Real threads: a writer racing close() and free(). Plain, under
+        # AddressSanitizer (a write into freed memory crashes), and under
+        # ThreadSanitizer (the gate's ordering is a real happens-before).
+        run: |
+          SRCS="tests/test_pcm_sink.c src/shared/usbif_byte_ring.c"
+          cc -std=c11 -Wall -Wextra -Werror -O2 -pthread -Isrc -o /tmp/test_pcm_sink $SRCS
+          /tmp/test_pcm_sink
+          cc -std=c11 -Wall -Wextra -Werror -O1 -g -pthread -fsanitize=address,undefined \
+             -Isrc -o /tmp/test_pcm_sink_asan $SRCS
+          /tmp/test_pcm_sink_asan
+          cc -std=c11 -Wall -Wextra -Werror -O1 -g -pthread -fsanitize=thread \
+             -Isrc -o /tmp/test_pcm_sink_tsan $SRCS
+          /tmp/test_pcm_sink_tsan
+      - name: The C sink tests can fail (planted faults must be caught)
+        # A race test that has never failed proves nothing. Each build plants
+        # one fault in the gate; the test has to catch it or this step fails.
+        run: |
+          SRCS="tests/test_pcm_sink.c src/shared/usbif_byte_ring.c"
+          for fault in USBIF_PCM_SINK_PLANT_NO_WAIT USBIF_PCM_SINK_PLANT_NO_TRYLOCK; do
+            cc -std=c11 -Wall -Wextra -Werror -O1 -g -pthread -fsanitize=address,undefined \
+               -Isrc -D$fault -o /tmp/test_pcm_sink_planted $SRCS
+            if /tmp/test_pcm_sink_planted > /tmp/planted.log 2>&1; then
+              cat /tmp/planted.log
+              echo "planted fault $fault was NOT caught"; exit 1
+            fi
+            echo "planted fault $fault caught:"; grep -E "FAIL|ERROR: AddressSanitizer" /tmp/planted.log | head -3
+          done
       - name: Build and run the USB-MIDI packet codec tests
         run: |
           cc -std=c11 -Wall -Wextra -Werror -Isrc \
@@ -87,3 +115,33 @@ jobs:
       - name: Run the suite
         working-directory: usbif
         run: python -m unittest discover -s tests -p "test_*.py" -v
+
+  unix:
+    # The only place mod_usbif.c is compiled on a runner: MicroPython's unix
+    # port with usbif as a user C module. It also runs the c_sink() surface
+    # (usbif#43) on the real interpreter, where the host side is absent and
+    # the binding must say so rather than hand a usermod something to trust.
+    name: MicroPython unix build with usbif
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: usbif
+      - uses: actions/checkout@v4
+        with:
+          repository: PyDevices/pydevices
+          path: pydevices
+      - name: Check out MicroPython v1.29.0 (the version patches/ is written against)
+        run: |
+          git clone --depth 1 --branch v1.29.0 \
+            https://github.com/micropython/micropython.git micropython
+      - name: Build mpy-cross and the unix port with usbif
+        run: |
+          make -C micropython/mpy-cross -j4
+          make -C micropython/ports/unix submodules
+          make -C micropython/ports/unix -j4 \
+            USER_C_MODULES="$GITHUB_WORKSPACE/usbif" MICROPY_PY_SSL=0
+      - name: Run the c_sink surface check
+        env:
+          MICROPYPATH: ${{ github.workspace }}/usbif/lib:${{ github.workspace }}/pydevices/lib:${{ github.workspace }}/pydevices/utils
+        run: micropython/ports/unix/build-standard/micropython usbif/tests/unix_c_sink.py
