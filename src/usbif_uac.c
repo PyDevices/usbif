@@ -40,10 +40,36 @@ extern void usbif_pump_notify(void);
 #define USBIF_UAC_ENTITY_CLOCK (0x04)
 #define USBIF_UAC_ENTITY_FEATURE_UNIT (0x02)
 
-// The one rate the descriptor advertises. Kept as state rather than a constant
-// because the host still performs a set-current on it, and answering a later
-// get with a different value than the host set is a way to fail slowly.
-static uint32_t usbif_uac_sample_rate = CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE;
+// The rate the host last chose, from the discrete set the clock source
+// offers. It starts at the default, and answering a later get with anything
+// other than what the host set is a way to fail slowly. Volatile because the
+// C pump reads it from its own task to follow a change (usbif_i2s.c).
+static const uint32_t usbif_uac_rates[USBIF_UAC_N_RATES] = USBIF_UAC_RATES;
+static volatile uint32_t usbif_uac_sample_rate = USBIF_UAC_DEFAULT_RATE;
+
+static bool usbif_uac_rate_offered(uint32_t rate) {
+    for (size_t i = 0; i < USBIF_UAC_N_RATES; i++) {
+        if (usbif_uac_rates[i] == rate) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether every rate the clock offers is a whole multiple of `rate`: the pump
+// divides by an integer, so a board rate that fits one host rate and not the
+// other would play the second one at the wrong pitch.
+bool usbif_uac_rates_divisible_by(uint32_t divisor) {
+    if (divisor == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < USBIF_UAC_N_RATES; i++) {
+        if (usbif_uac_rates[i] % divisor) {
+            return false;
+        }
+    }
+    return true;
+}
 static bool usbif_uac_mute;
 static uint16_t usbif_uac_volume;   // 1/256 dB, as UAC2 specifies
 // The volume and mute above, folded into one linear Q16 multiplier for the
@@ -99,6 +125,10 @@ bool usbif_uac_is_enabled(void) {
 // Called by usbif_desc.c on an advertise/withdraw toggle (overrides its weak).
 void usbif_uac_on_ext_toggled(void) {
     usbif_uac_streaming = false;
+    // A fresh enumeration starts at the default rate. Without this a costume
+    // toggle kept whatever the last host chose, and the next host asking for
+    // the current rate was told 44.1 kHz by a device it had never set.
+    usbif_uac_sample_rate = USBIF_UAC_DEFAULT_RATE;
 }
 
 void usbif_uac_note_read(void) {
@@ -131,17 +161,18 @@ static bool clock_get(uint8_t rhport, audio_control_request_t const *request) {
                 rhport, (tusb_control_request_t const *)request, &cur, sizeof(cur));
         }
         if (request->bRequest == AUDIO_CS_REQ_RANGE) {
-            // A single discrete rate. Advertising a range we cannot actually
-            // clock would move the failure from enumeration to playback,
-            // where it is far harder to diagnose.
-            audio_control_range_4_n_t(1) range = {
-                .wNumSubRanges = tu_htole16(1),
-                .subrange[0] = {
-                    .bMin = (int32_t)tu_htole32(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE),
-                    .bMax = (int32_t)tu_htole32(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE),
-                    .bRes = (int32_t)tu_htole32(0),
-                },
+            // Discrete rates, one subrange each with min = max. Advertising
+            // a continuous range we cannot actually clock would move the
+            // failure from enumeration to playback, where it is far harder
+            // to diagnose.
+            audio_control_range_4_n_t(USBIF_UAC_N_RATES) range = {
+                .wNumSubRanges = tu_htole16(USBIF_UAC_N_RATES),
             };
+            for (size_t i = 0; i < USBIF_UAC_N_RATES; i++) {
+                range.subrange[i].bMin = (int32_t)tu_htole32(usbif_uac_rates[i]);
+                range.subrange[i].bMax = (int32_t)tu_htole32(usbif_uac_rates[i]);
+                range.subrange[i].bRes = (int32_t)tu_htole32(0);
+            }
             return tud_audio_buffer_and_schedule_control_xfer(
                 rhport, (tusb_control_request_t const *)request, &range, sizeof(range));
         }
@@ -215,7 +246,18 @@ bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
 
     if (request->bEntityID == USBIF_UAC_ENTITY_CLOCK
         && request->bControlSelector == AUDIO_CS_CTRL_SAM_FREQ) {
-        usbif_uac_sample_rate = tu_le32toh(((audio_control_cur_4_t *)buf)->bCur);
+        // Refuse a rate the range did not offer: a stall tells the host at
+        // once, where accepting it would play at the wrong pitch.
+        uint32_t rate = tu_le32toh(((audio_control_cur_4_t *)buf)->bCur);
+        if (!usbif_uac_rate_offered(rate)) {
+            return false;
+        }
+        usbif_uac_sample_rate = rate;
+        // A running pump retunes its I2S clock on its next pass; wake it so
+        // that happens before the first packet at the new rate lands.
+        if (usbif_pump_is_running()) {
+            usbif_pump_notify();
+        }
         return true;
     }
     if (request->bEntityID == USBIF_UAC_ENTITY_FEATURE_UNIT) {

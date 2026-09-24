@@ -336,6 +336,8 @@ extern int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
 extern void usbif_pump_stop(void);
 extern bool usbif_pump_is_running(void);
 extern uint32_t usbif_pump_bytes, usbif_pump_idle, usbif_pump_timeouts, usbif_pump_shed;
+extern uint32_t usbif_pump_retunes;
+extern uint32_t usbif_pump_wire_rate(void);
 #endif
 
 // Diagnostic: what the host has actually asked the audio function for.
@@ -458,8 +460,11 @@ static mp_obj_t usbif_uac_pump_start(size_t n_args, const mp_obj_t *pos_args,
         // Give the I2S peripheral the MCLK pin so every clock the codec sees
         // comes from one divider. -1 leaves MCLK to whatever else drives it.
         { MP_QSTR_mclk, MP_ARG_KW_ONLY | MP_ARG_INT, { .u_int = -1 } },
+        // The board's I2S rate while the host runs its default 48 kHz. It
+        // must divide every offered host rate; the wire follows the host's
+        // choice at the same ratio (24000 here is 22050 at 44.1 kHz).
         { MP_QSTR_rate, MP_ARG_KW_ONLY | MP_ARG_INT,
-          { .u_int = CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE } },
+          { .u_int = USBIF_UAC_DEFAULT_RATE } },
         { MP_QSTR_bits, MP_ARG_KW_ONLY | MP_ARG_INT, { .u_int = 16 } },
         { MP_QSTR_channels, MP_ARG_KW_ONLY | MP_ARG_INT, { .u_int = 1 } },
         { MP_QSTR_i2s_id, MP_ARG_KW_ONLY | MP_ARG_INT, { .u_int = 0 } },
@@ -514,6 +519,24 @@ static mp_obj_t usbif_uac_pump_stats(void) {
     #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_pump_stats_obj, usbif_uac_pump_stats);
+
+// (host rate, wire rate, retunes): what the host chose, what the I2S wire is
+// clocked at (0 with no pump), and how often the pump has followed a change.
+// Its own call rather than two more fields on uac_pump_stats, whose five-tuple
+// callers unpack.
+static mp_obj_t usbif_uac_pump_rate(void) {
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    mp_obj_t items[3] = {
+        mp_obj_new_int_from_uint(usbif_uac_current_rate()),
+        mp_obj_new_int_from_uint(usbif_pump_wire_rate()),
+        mp_obj_new_int_from_uint(usbif_pump_retunes),
+    };
+    return mp_obj_new_tuple(3, items);
+    #else
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_pump_rate_obj, usbif_uac_pump_rate);
 
 // Diagnostic: (running, attaches, detaches, errors, lib_devices, lib_clients).
 static mp_obj_t usbif_host_stats(void) {
@@ -1584,6 +1607,7 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_uac_pump_start), MP_ROM_PTR(&usbif_uac_pump_start_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_stop), MP_ROM_PTR(&usbif_uac_pump_stop_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_stats), MP_ROM_PTR(&usbif_uac_pump_stats_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uac_pump_rate), MP_ROM_PTR(&usbif_uac_pump_rate_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_available), MP_ROM_PTR(&usbif_uac_available_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_volume), MP_ROM_PTR(&usbif_uac_volume_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_read), MP_ROM_PTR(&usbif_uac_read_obj) },

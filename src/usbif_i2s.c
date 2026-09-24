@@ -42,6 +42,9 @@
 // Host volume and mute as one linear Q16 multiplier, maintained by the
 // control layer in usbif_uac.c.
 extern uint32_t usbif_uac_gain(void);
+// The rate the host chose, and whether a board rate divides every offered one.
+extern uint32_t usbif_uac_current_rate(void);
+extern bool usbif_uac_rates_divisible_by(uint32_t divisor);
 
 // One 20 ms block at 24 kHz mono 16-bit, the same size the Python pump found
 // worked well: large enough that per-write overhead is irrelevant, small
@@ -76,6 +79,16 @@ static uint8_t usbif_decimate = 1;      // take 1 of every N frames
 // hardware wants, and it consumes frames twice as fast: the stream plays an
 // octave up. See PyDevices/usbif#12.
 static uint8_t usbif_sink_channels = 1;
+
+// The host picks 44.1 or 48 kHz (usbif#35); the wire follows at the same
+// ratio, so the pump never interpolates. `usbif_decimate` is fixed when the
+// pump starts, from the board's rate against the default host rate; the wire
+// runs at host rate / N. With the P4's 24 kHz board rate that is 24 kHz for a
+// 48 kHz host and 22.05 kHz for a 44.1 kHz one. The host rate the wire is
+// currently clocked for is kept here so the task can notice a change.
+static uint32_t usbif_pump_host_rate;
+static i2s_std_clk_config_t usbif_pump_clk;
+uint32_t usbif_pump_retunes;
 
 static i2s_chan_handle_t usbif_i2s_tx;
 static TaskHandle_t usbif_pump_task_handle;
@@ -113,6 +126,21 @@ static void usbif_pump_task(void *arg) {
     uint8_t carry_len = 0;
 
     while (usbif_pump_running) {
+        // Follow the host's rate. Retuned here, in the one task that writes
+        // the channel, so no write can race the reconfiguration; the control
+        // request that changed the rate wakes this task for it. The channel
+        // has to be disabled to take a new clock. A carried partial frame
+        // belongs to the old stream and is dropped with it.
+        const uint32_t host_rate = usbif_uac_current_rate();
+        if (host_rate != usbif_pump_host_rate) {
+            usbif_pump_clk.sample_rate_hz = host_rate / usbif_decimate;
+            i2s_channel_disable(usbif_i2s_tx);
+            i2s_channel_reconfig_std_clock(usbif_i2s_tx, &usbif_pump_clk);
+            i2s_channel_enable(usbif_i2s_tx);
+            usbif_pump_host_rate = host_rate;
+            usbif_pump_retunes++;
+            carry_len = 0;
+        }
         // No overflow guard here, deliberately. The pump reads a block larger
         // than the whole FIFO on every iteration, so while it is running the
         // FIFO cannot accumulate: it is drained to empty each time round. An
@@ -252,6 +280,22 @@ int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
         return ESP_ERR_INVALID_STATE;
     }
 
+    // Integer decimation only: the pump takes 1 frame in N, so the board rate
+    // has to divide the default host rate exactly -- and, since the host may
+    // choose any offered rate and the wire follows at the same N, every
+    // offered rate. It once did not check at all, and 32 kHz computed N=1 by
+    // truncation and fed a 48 kHz stream into a 32 kHz wire, playing about a
+    // fifth flat with nothing reporting a fault. Refuse rather than sound
+    // wrong. See usbif#12 and usbif#35.
+    if (rate == 0 || (USBIF_UAC_DEFAULT_RATE % rate) != 0
+        || !usbif_uac_rates_divisible_by(USBIF_UAC_DEFAULT_RATE / rate)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    usbif_decimate = (uint8_t)(USBIF_UAC_DEFAULT_RATE / rate);
+    // The wire starts at whatever the host has already chosen: a host may set
+    // 44.1 kHz before the board starts its pump.
+    usbif_pump_host_rate = usbif_uac_current_rate();
+
     i2s_chan_config_t chan_config = I2S_CHANNEL_DEFAULT_CONFIG(i2s_id, I2S_ROLE_MASTER);
     chan_config.auto_clear = true;   // send zeros on underrun rather than stale data
     esp_err_t err = i2s_new_channel(&chan_config, &usbif_i2s_tx, NULL);
@@ -267,7 +311,9 @@ int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
     // frame, and a mono source is duplicated into it.
     slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
 
-    i2s_std_config_t clk_holder_cfg = { .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(rate) };
+    i2s_std_config_t clk_holder_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(usbif_pump_host_rate / usbif_decimate)
+    };
     // The MCLK multiple comes from the caller, which takes it from the board's
     // published AUDIO_OUT.wire.mck_fs. It used to be hard-coded to 512 with a
     // comment claiming that was "what board_peripherals asked its PWM for" --
@@ -293,6 +339,8 @@ int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
             clk_holder_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
             break;
         default:
+            i2s_del_channel(usbif_i2s_tx);
+            usbif_i2s_tx = NULL;
             return ESP_ERR_INVALID_ARG;
     }
 
@@ -332,26 +380,14 @@ int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
         usbif_i2s_tx = NULL;
         return ESP_ERR_NOT_SUPPORTED;
     }
-    // Integer decimation only: the pump takes 1 frame in N, so the board rate
-    // has to divide the host rate exactly. It did not check, and 32 kHz -- a
-    // rate it otherwise accepts -- computed N=1 by truncation and fed a 48 kHz
-    // stream into a 32 kHz wire, playing about a fifth flat with nothing
-    // reporting a fault. Refuse rather than sound wrong. See usbif#12.
-    if (rate == 0 || (CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE % rate) != 0) {
-        i2s_channel_disable(usbif_i2s_tx);
-        i2s_del_channel(usbif_i2s_tx);
-        usbif_i2s_tx = NULL;
-        return ESP_ERR_INVALID_ARG;
-    }
-    usbif_decimate = (uint8_t)(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE / rate);
-    if (usbif_decimate < 1) {
-        usbif_decimate = 1;
-    }
+    // Kept for retuning when the host changes rate (the task, above).
+    usbif_pump_clk = std_cfg.clk_cfg;
 
     usbif_pump_bytes = 0;
     usbif_pump_idle = 0;
     usbif_pump_timeouts = 0;
     usbif_pump_shed = 0;
+    usbif_pump_retunes = 0;
     usbif_pump_running = true;
 
     if (xTaskCreate(usbif_pump_task, "usbif_uac", USBIF_PUMP_TASK_STACK, NULL,
@@ -363,6 +399,10 @@ int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+uint32_t usbif_pump_wire_rate(void) {
+    return usbif_pump_running ? usbif_pump_host_rate / usbif_decimate : 0;
 }
 
 bool usbif_pump_is_running(void) {
