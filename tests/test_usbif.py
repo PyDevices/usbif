@@ -917,12 +917,26 @@ class TestHidKeyboardDecoder(unittest.TestCase):
         # A key this table does not know must still produce an event carrying
         # its scancode, so an application can handle it and a gap is visible
         # rather than silent.
+        # 0x32 is the ISO "# ~" key, which the table leaves unmapped.
         import events
 
-        (event,) = self.d.feed(self._report(0, 0x68))   # F13, unmapped
+        (event,) = self.d.feed(self._report(0, 0x32))
         self.assertEqual(event.type, events.KEYDOWN)
         self.assertIsNone(event.key)
-        self.assertEqual(event.scancode, 0x68)
+        self.assertEqual(event.scancode, 0x32)
+
+    def test_the_table_is_pydevices_own(self):
+        # One table for USB and BLE keyboards (pydevices#93). A copy here
+        # would drift from the one bledev.hidreport uses, and a key would
+        # read differently depending on how it arrived.
+        import keys
+        from usbif import hid_keyboard
+
+        self.assertIs(hid_keyboard.keycode, keys.hid_keycode)
+        self.assertIs(hid_keyboard.modifier_mask, keys.hid_modifiers)
+        self.assertEqual([(kmod, code) for _, kmod, code, _ in hid_keyboard._MODIFIER_KEYS],
+                         list(keys.HID_MODIFIERS))
+        self.assertEqual(hid_keyboard.keycode(0x68), keys.K_F13)  # F13, past the boot set
 
     def test_a_short_report_is_ignored(self):
         self.assertEqual(self.d.feed(b"\x00\x00"), ())
