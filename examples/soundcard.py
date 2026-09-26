@@ -30,11 +30,14 @@ import time
 import board_peripherals as bp
 import usbif.auto
 
-# The host sees 48 kHz stereo by default and may choose 44.1 kHz instead;
-# the board codec is typically 24 kHz mono. The C pump decimates by the ratio
-# between the board rate and 48 kHz, and follows a 44.1 kHz host at the same
-# ratio (22.05 kHz on the wire), so neither side resamples. Pass the board's
-# own rate so pitch is right.
+# The host sees 48 kHz stereo by default and may choose 44.1 kHz instead.
+# The I2S wire runs at the host's own rate when the board can clock it there
+# (see _wire_rate), so the pump passes every frame and follows a 44.1 kHz host
+# at 1:1. A board with fixed clocks gets its own rate, and the pump decimates
+# by the ratio -- one frame in N, unfiltered, so everything above half the
+# board rate aliases. Channels stay the board's: a mono codec gets the host's
+# left and right averaged.
+HOST_RATE = 48000
 DEFAULT_VOLUME = 85  # digital gain; 100 overdrives the P4 panel amp, 50 is barely audible
 
 
@@ -84,12 +87,27 @@ def _bring_up_codec():
     return True
 
 
+def _wire_rate(capability):
+    """The I2S rate: the host's, if the board can clock its codec there.
+
+    ``rates`` is None for a PLL that takes any rate (the ESP32 family), or
+    the list a fixed crystal can make. Where the host's rate is out of reach
+    the board's default stands and the pump decimates to it: on the
+    ESP32-P4 panel that was 24 kHz -- every other frame dropped, unfiltered,
+    so nothing above 12 kHz and aliasing below it.
+    """
+    rates = capability.rates
+    if rates is None or HOST_RATE in rates:
+        return HOST_RATE
+    return capability.default.rate
+
+
 def main():
     dev = usbif.auto.device()
     wire = _wire()
     bclk, ws, dout, mclk = wire.sck, wire.ws, wire.sd, wire.mck
     fmt = bp.AUDIO_OUT.default
-    rate, bits, channels = fmt.rate, fmt.bits, fmt.channels
+    rate, bits, channels = _wire_rate(bp.AUDIO_OUT), fmt.bits, fmt.channels
 
     powered = _bring_up_codec()
 
