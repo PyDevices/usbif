@@ -235,10 +235,11 @@ absent rather than one that fails loudly:
 The sound card wants TinyUSB 0.19 or later, which re-arms its endpoint in
 the USB interrupt. On the older TinyUSB that MicroPython 1.29's esp32 port
 builds, the endpoint waits for the interpreter, and a busy application loses
-about 5 % of the stream, heard as a tick
+5 to 13 % of the stream, heard as a tick
 ([#39](https://github.com/PyDevices/usbif/issues/39)).
-micropython-pydevices' patch 0014 moves the port to 0.21. usbif builds either
-way.
+micropython-pydevices' patch 0014 moves the ESP32-P4 to 0.21. The S2 and S3
+stay on 0.18 for now ([#48](https://github.com/PyDevices/usbif/issues/48)), so
+an S3 sound card still ticks under load. usbif builds either way.
 
 Then, on MicroPython 1.29 or later, add one line to the manifest your board
 build already uses (usually `ports/esp32/boards/manifest.py`, unless your board
