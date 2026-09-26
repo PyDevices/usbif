@@ -18,6 +18,11 @@
 #include <math.h>
 
 #include "py/mpconfig.h"
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#else
+#define IRAM_ATTR
+#endif
 
 // tusb.h must come first: CFG_TUD_AUDIO is defined by MicroPython's
 // tusb_config.h (via usbif's extension header), not by mpconfig.h. Testing it
@@ -325,7 +330,7 @@ bool tud_audio_set_itf_close_EP_cb(uint8_t rhport, tusb_control_request_t const 
 // be reading it too, so it went when this moved into the interrupt.
 #define USBIF_UAC_HIGH_WATER (CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ * 3 / 4)
 
-static inline void usbif_uac_on_rx(uint16_t n_bytes_received) {
+static inline void IRAM_ATTR usbif_uac_on_rx(uint16_t n_bytes_received) {
     usbif_uac_rx_packets++;
     usbif_uac_rx_bytes += n_bytes_received;
     // Wake the C pump the instant audio lands, so it never has to sleep
@@ -338,7 +343,7 @@ static inline void usbif_uac_on_rx(uint16_t n_bytes_received) {
 }
 
 #if TUSB_VERSION_NUMBER >= 1900
-bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received,
+bool IRAM_ATTR tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received,
     uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting) {
     (void)rhport;
     (void)func_id;

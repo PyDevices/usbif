@@ -347,6 +347,7 @@ extern volatile uint32_t usbif_pump_dma_bytes, usbif_pump_dma_starved;
 extern int64_t usbif_pump_dma_elapsed_us(void);
 extern const int16_t *usbif_pump_tap(uint32_t *n);
 extern bool usbif_pump_tap_arm(void);
+#include "usbif_meter.h"
 extern uint32_t usbif_uac_rx_packets, usbif_uac_rx_bytes;
 #endif
 
@@ -565,6 +566,83 @@ static mp_obj_t usbif_uac_pump_clock(void) {
     #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_pump_clock_obj, usbif_uac_pump_clock);
+
+// The spectrum meter (usbif_meter.c, spike). uac_pump_meter(bands, lo_hz,
+// hi_hz) asks the pump for `bands` log-spaced band levels between the two
+// frequencies; uac_pump_meter(0) turns it off. With no arguments it returns
+// its cost: (enabled, bands, analyses, feed us, analysis us, worst analysis
+// us, elapsed us, cpu MHz).
+static mp_obj_t usbif_uac_pump_meter(size_t n_args, const mp_obj_t *args) {
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    if (n_args) {
+        int bands = mp_obj_get_int(args[0]);
+        float lo = n_args > 1 ? mp_obj_get_float(args[1]) : 20.0f;
+        float hi = n_args > 2 ? mp_obj_get_float(args[2]) : 20000.0f;
+        if (bands < 0 || bands > USBIF_METER_MAX_BANDS || lo <= 0 || hi <= lo) {
+            mp_raise_ValueError(NULL);
+        }
+        if (bands && !usbif_meter_alloc()) {
+            mp_raise_type(&mp_type_MemoryError);
+        }
+        usbif_meter_configure(bands, lo, hi);
+        return mp_const_none;
+    }
+    usbif_meter_stats_t st;
+    usbif_meter_stats(&st);
+    mp_obj_t items[8] = {
+        mp_obj_new_bool(st.enabled),
+        MP_OBJ_NEW_SMALL_INT(st.bands),
+        mp_obj_new_int_from_uint(st.analyses),
+        mp_obj_new_int_from_ull(st.feed_us),
+        mp_obj_new_int_from_ull(st.fft_us),
+        mp_obj_new_int_from_uint(st.max_fft_us),
+        mp_obj_new_int_from_ll(st.elapsed_us),
+        mp_obj_new_int_from_uint(st.cpu_mhz),
+    };
+    return mp_obj_new_tuple(8, items);
+    #else
+    (void)n_args;
+    (void)args;
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_uac_pump_meter_obj, 0, 3, usbif_uac_pump_meter);
+
+// uac_pump_levels([buf]): (seq, levels, peak, rms). levels holds one byte per
+// band in half-dB steps (0 = -100 dB, 200 = 0 dB, a full-scale sine); peak and
+// rms are the same scale over the last analysis hop. Pass a bytearray to have
+// it filled rather than a new bytes made. seq advances with each analysis
+// (about 60 a second while audio flows), so a reader can tell fresh levels
+// from a stopped stream.
+static mp_obj_t usbif_uac_pump_levels(size_t n_args, const mp_obj_t *args) {
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    uint8_t tmp[USBIF_METER_MAX_BANDS];
+    uint8_t pk = 0, rms = 0;
+    uint32_t n = 0;
+    uint32_t seq = usbif_meter_read(tmp, sizeof(tmp), &pk, &rms, &n);
+    mp_obj_t lv;
+    if (n_args && args[0] != mp_const_none) {
+        mp_buffer_info_t buf;
+        mp_get_buffer_raise(args[0], &buf, MP_BUFFER_WRITE);
+        memcpy(buf.buf, tmp, MIN(n, buf.len));
+        lv = args[0];
+    } else {
+        lv = mp_obj_new_bytes(tmp, n);
+    }
+    mp_obj_t items[4] = {
+        mp_obj_new_int_from_uint(seq),
+        lv,
+        MP_OBJ_NEW_SMALL_INT(pk),
+        MP_OBJ_NEW_SMALL_INT(rms),
+    };
+    return mp_obj_new_tuple(4, items);
+    #else
+    (void)n_args;
+    (void)args;
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_uac_pump_levels_obj, 0, 1, usbif_uac_pump_levels);
 
 // uac_pump_tap(): the samples last captured going to I2S, as bytes (int16
 // mono), or None while a capture is still filling. uac_pump_tap(True) arms a
@@ -1704,6 +1782,8 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_uac_pump_stats), MP_ROM_PTR(&usbif_uac_pump_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_rate), MP_ROM_PTR(&usbif_uac_pump_rate_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_clock), MP_ROM_PTR(&usbif_uac_pump_clock_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uac_pump_meter), MP_ROM_PTR(&usbif_uac_pump_meter_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uac_pump_levels), MP_ROM_PTR(&usbif_uac_pump_levels_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_tap), MP_ROM_PTR(&usbif_uac_pump_tap_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_available), MP_ROM_PTR(&usbif_uac_available_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_volume), MP_ROM_PTR(&usbif_uac_volume_obj) },

@@ -122,7 +122,7 @@ class FacadeWithoutTheModuleTests(unittest.TestCase):
         "msc_buffer", "msc_bd_stats",
         "hid_send", "hid_leds",
         "uac_enable", "uac_pump_start", "uac_pump_stop", "uac_pump_stats",
-        "uac_pump_rate",
+        "uac_pump_rate", "uac_pump_meter", "uac_pump_levels",
         "uac_available", "uac_volume", "uac_read", "uac_stats",
         "uvc_format", "uvc_reset", "uvc_streaming", "uvc_ready",
         "uvc_submit", "uvc_stats",
