@@ -69,6 +69,28 @@ def open_card():
         ) from exc
 
 
+def card_geometry(card):
+    """Return ``(blocks, block_size)``, or raise if the card never answered.
+
+    ``ioctl(4)`` and ``ioctl(5)`` are the block count and block size, and a
+    card that is absent, unpowered or still timing out answers them with
+    ``-1`` rather than raising. Serving that to a host is serving a drive of
+    no blocks: the example used to print a negative size and then do nothing
+    at all, which reads as the example being broken rather than the card
+    (usbif#4). So refuse it here, while the reason is still known.
+    """
+    blocks = card.ioctl(4, 0)
+    block_size = card.ioctl(5, 0)
+    if not isinstance(blocks, int) or not isinstance(block_size, int) \
+            or blocks <= 0 or block_size <= 0:
+        raise RuntimeError(
+            "the SD card did not answer (ioctl reported {} blocks of {} "
+            "bytes): check that a card is seated in the slot, then reset "
+            "the board, since a card left half-initialised by an earlier "
+            "attempt does not recover on its own".format(blocks, block_size))
+    return blocks, block_size
+
+
 def main():
     dev = usbif.auto.device()
 
@@ -78,8 +100,7 @@ def main():
     dev.msc_detach()
 
     card = open_card()
-    blocks = card.ioctl(4, 0)
-    block_size = card.ioctl(5, 0)
+    blocks, block_size = card_geometry(card)
     print("card: {} blocks x {} bytes = {} MB".format(
         blocks, block_size, blocks * block_size // (1024 * 1024)))
 
