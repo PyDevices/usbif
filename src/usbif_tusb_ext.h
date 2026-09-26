@@ -186,9 +186,19 @@
 //
 // TinyUSB's guidance is a minimum of four frames to absorb jitter; the
 // example's multiplier keeps a little more than that.
+//
+// TinyUSB 0.20 made the speed TUD_AUDIO_EP_SIZE's first argument; before it
+// the macro read TUD_OPT_HIGH_SPEED itself. Same figure either way.
+#if TUSB_VERSION_NUMBER >= 2000
+#define USBIF_TUD_AUDIO_EP_SIZE(_rate, _bytes, _channels) \
+    TUD_AUDIO_EP_SIZE(TUD_OPT_HIGH_SPEED, _rate, _bytes, _channels)
+#else
+#define USBIF_TUD_AUDIO_EP_SIZE(_rate, _bytes, _channels) \
+    TUD_AUDIO_EP_SIZE(_rate, _bytes, _channels)
+#endif
 #define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ          \
     ((TUD_OPT_HIGH_SPEED ? 32 : 4)                     \
-     * TUD_AUDIO_EP_SIZE(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE, \
+     * USBIF_TUD_AUDIO_EP_SIZE(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE, \
     CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX,        \
     CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX))
 #define CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP (1)

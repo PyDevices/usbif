@@ -4,7 +4,9 @@ Starts the sound card as ``examples/soundcard.py`` does, then prints one
 ``MEASURE`` line every 10 s:
 
 - ``pkts/s``: isochronous packets TinyUSB handed over. A high-speed host sends
-  1000 a second.
+  8000 a second on a firmware built with TinyUSB 0.19 or later, and 1000 on
+  an older one (the endpoint's interval differs, see usbif_desc.c); a
+  full-speed host sends 1000.
 - ``pump%``: bytes the pump gave I2S, against the wire rate. The gate is
   99.5 % or more.
 - ``dma_rate``: the rate the I2S DMA actually consumed, in frames a second:
@@ -16,7 +18,8 @@ Starts the sound card as ``examples/soundcard.py`` does, then prints one
 
 Counts in a pitch window include the board's own work on the tap. Set
 ``STRESS = 1`` to keep the interpreter busy allocating instead of sleeping,
-which is how usbif#39 was measured.
+which is how usbif#39 was measured: 91-95 % on the old TinyUSB, 100 % on
+0.21.
 
 Run it with ``mpftp run -d COM4 tests/hardware/uac_stream_check.py``, play a
 tone with ``uac_play_tone.py`` from Windows, and read the lines with
