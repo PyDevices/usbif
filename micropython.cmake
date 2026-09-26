@@ -38,6 +38,7 @@ target_sources(usermod_usbif INTERFACE
     ${USBIF_SRC_DIR}/mod_usbif.c
     ${USBIF_SRC_DIR}/usbif_uac.c
     ${USBIF_SRC_DIR}/usbif_i2s.c
+    ${USBIF_SRC_DIR}/usbif_meter.c
     ${USBIF_SRC_DIR}/usbif_host.c
     ${USBIF_SRC_DIR}/usbif_host_cdc.c
     ${USBIF_SRC_DIR}/usbif_host_hid.c
@@ -67,6 +68,8 @@ if(ESP_PLATFORM)
     idf_component_get_property(usbif_tusb_lib espressif__tinyusb COMPONENT_LIB)
     if(usbif_tusb_lib)
         target_include_directories(${usbif_tusb_lib} PRIVATE ${USBIF_SRC_DIR})
+        # Spike: the audio receive path in IRAM (src/usbif_isr_iram.lf).
+        __ldgen_add_fragment_files("${USBIF_SRC_DIR}/usbif_isr_iram.lf")
     endif()
     # The IDF defines ESP_PLATFORM for its own components but not for a user C
     # module, and FreeRTOS's ESP-IDF trace-macro defaults sit behind it: on the

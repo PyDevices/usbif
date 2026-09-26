@@ -327,6 +327,16 @@ class NativeDevice(Device):
         rate the pump's I2S wire is clocked at, and how often it followed."""
         return _require().uac_pump_rate(*args)
 
+    def uac_pump_meter(self, *args):
+        """Spectrum meter in the C pump: ``(bands, lo_hz, hi_hz)`` turns it
+        on, ``(0)`` off, no arguments returns its cost counters."""
+        return _require().uac_pump_meter(*args)
+
+    def uac_pump_levels(self, *args):
+        """``(seq, levels, peak, rms)``: the meter's latest band levels, one
+        byte each in half-dB steps (200 = a full-scale sine)."""
+        return _require().uac_pump_levels(*args)
+
     def uac_available(self, *args):
         return _require().uac_available(*args)
 

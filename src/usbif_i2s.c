@@ -42,6 +42,8 @@
 
 #include "py/runtime.h"
 
+#include "usbif_meter.h"
+
 // Host volume and mute as one linear Q16 multiplier, maintained by the
 // control layer in usbif_uac.c.
 extern uint32_t usbif_uac_gain(void);
@@ -108,7 +110,7 @@ static TaskHandle_t usbif_pump_task_handle;
 // Callable from both sides: the packet hook runs in the USB interrupt on a
 // TinyUSB that re-arms there (usbif#39), and the rate change and start-up
 // wakes run in tasks. Each context gets its own FreeRTOS call.
-void usbif_pump_notify(void) {
+void IRAM_ATTR usbif_pump_notify(void) {
     TaskHandle_t task = usbif_pump_task_handle;
     if (!task) {
         return;
@@ -253,6 +255,12 @@ static void usbif_pump_task(void *arg) {
         if (carry_len) {
             memcpy(carry, block + usable, carry_len);
         }
+
+        // The spectrum meter looks at the host's frames before they are
+        // mixed down and scaled for the wire (usbif_meter.c). Off, it costs
+        // one flag test.
+        usbif_meter_feed((const int16_t *)(void *)block, usable / frame_bytes,
+            usbif_src_channels, host_rate);
 
         uint16_t out_bytes = usable;
         // Host volume and mute, as one Q16 multiplier maintained by the
@@ -494,7 +502,7 @@ uint32_t usbif_pump_wire_rate(void) {
     return usbif_pump_running ? usbif_pump_host_rate / usbif_decimate : 0;
 }
 
-bool usbif_pump_is_running(void) {
+bool IRAM_ATTR usbif_pump_is_running(void) {
     return usbif_pump_running;
 }
 

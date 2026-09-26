@@ -1,0 +1,13 @@
+# The sound card's receive path, from the USB interrupt to the pump's wake-up,
+# in IRAM instead of flash (audio meter spike). Out of flash, every cache miss
+# in this path delays the endpoint re-arm, and anything that keeps the cache
+# busy -- a display pushing frames through PSRAM -- turns into lost
+# isochronous packets.
+[mapping:usbif_tinyusb_isr]
+archive: libespressif__tinyusb.a
+entries:
+    dcd_dwc2 (noflash)
+    dwc2_common (noflash)
+    usbd (noflash)
+    audio_device (noflash)
+    tusb_fifo (noflash)
