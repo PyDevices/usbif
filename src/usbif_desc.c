@@ -274,19 +274,31 @@ static void usbif_fixup_block(uint8_t *p, uint16_t len, int itf_delta) {
 // the device never enumerates: usbif#24, every costume with CDC in it. MIDI
 // used to be the one class patched this way, by compile-time address.
 //
-// The audio data endpoint also takes its interval for the speed: one packet
-// per millisecond at both. bInterval is an exponent at high speed, so 4 means
-// every eighth microframe, and 1 at full speed is every frame -- the same
-// cadence either way. It used to be 1 at both, which at high speed asks for
-// a packet every 125 us, and TinyUSB re-arms this endpoint from the
-// MicroPython task, through its scheduler. Whenever the interpreter took
-// longer than one microframe to get round to it, the next packet found the
-// endpoint unarmed and was lost: 20 % of them for long stretches, a third
-// under load. The pump then played what arrived back to back, so the music
-// came out a major third or more sharp, and rough where the gaps were
-// spliced (usbif#37). A millisecond gives the interpreter eight times the
-// room. It does not remove the dependence: see usbif#39.
+// The audio data endpoint also takes its interval for the speed.
+//
+// On TinyUSB 0.19 and later it is 1 at both speeds: a packet every
+// microframe at high speed, every frame at full speed. The driver re-arms
+// the endpoint in the USB interrupt, microseconds after each packet, so
+// nothing waits for the interpreter (usbif#39). It has to be 1 there, not
+// merely may be: the DWC2 driver arms an isochronous OUT endpoint for the
+// microframe after the current one, and with a longer interval the host's
+// next packet comes in a microframe of the other parity, which the
+// controller drops. At bInterval 4 on 0.21 the P4 received no packets at all.
+//
+// On older TinyUSB it is 4 at high speed, every eighth microframe, so one
+// packet per millisecond at both speeds. There the audio driver re-armed this
+// endpoint from tud_task(), which on the esp32 port runs in the MicroPython
+// task through its scheduler. At a packet every 125 us, whenever the
+// interpreter took longer than a microframe to get round to it, the next
+// packet found the endpoint unarmed and was lost: 20 % of them for long
+// stretches, a third under load, and the music came out a major third or
+// more sharp (usbif#37). A millisecond gave the interpreter eight times the
+// room; a busy one still lost 5 %.
+#if TUSB_VERSION_NUMBER >= 1900
+#define USBIF_UAC_HS_INTERVAL (1)
+#else
 #define USBIF_UAC_HS_INTERVAL (4)
+#endif
 
 static void usbif_renumber_endpoints(uint8_t *buf, uint16_t total, uint16_t bulk_mps) {
     uint8_t next_in = 1;

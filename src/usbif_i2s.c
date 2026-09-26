@@ -104,12 +104,21 @@ static TaskHandle_t usbif_pump_task_handle;
 // 3.3% of the stream that way; a 4.7 ms one lost half of it to the sleep.
 // Being woken removes the compromise: the FIFO can stay as small as the
 // feedback regulator wants, because the pump no longer sleeps through it.
+//
+// Callable from both sides: the packet hook runs in the USB interrupt on a
+// TinyUSB that re-arms there (usbif#39), and the rate change and start-up
+// wakes run in tasks. Each context gets its own FreeRTOS call.
 void usbif_pump_notify(void) {
     TaskHandle_t task = usbif_pump_task_handle;
-    if (task) {
+    if (!task) {
+        return;
+    }
+    if (xPortInIsrContext()) {
         BaseType_t higher_woken = pdFALSE;
         vTaskNotifyGiveFromISR(task, &higher_woken);
         portYIELD_FROM_ISR(higher_woken);
+    } else {
+        xTaskNotifyGive(task);
     }
 }
 static volatile bool usbif_pump_running;

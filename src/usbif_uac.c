@@ -296,55 +296,68 @@ bool tud_audio_set_itf_close_EP_cb(uint8_t rhport, tusb_control_request_t const 
     return true;
 }
 
-// Explicit feedback: the host's clock and ours are independent, so the device
-// reports how fast it is actually consuming samples and the host adjusts. FIFO
-// counting is TinyUSB's simplest method and needs no timer capture hardware.
-// Called after each received packet. If nothing is draining the FIFO it fills,
-// the FIFO-count feedback tells the host to slow down, and the host ends up
-// waiting on a device that will never catch up -- which on Windows stalled the
-// audio engine badly enough to back up the whole desktop.
+// Called once per isochronous OUT packet, after TinyUSB has put it in the
+// endpoint FIFO and re-armed the endpoint.
 //
-// The trigger is a high-water mark rather than a "no consumer for N ms" timer.
-// A timer deadlocks against any consumer that batches: draining on a timeout
-// keeps the FIFO empty, a consumer waiting for a 20 ms block never sees one,
-// so it never reads, so the timeout never clears. (Observed: the pump moved
-// exactly zero bytes.) A high-water mark cannot deadlock -- it does nothing
-// at all while a consumer keeps up, whatever its block size, and only sheds
-// samples that were never going to be played.
+// Where it runs depends on the TinyUSB the port builds, and that is the whole
+// of usbif#39. Before 0.19 the audio driver finished a packet from
+// tud_task(): it copied the packet to the FIFO, re-armed the endpoint and
+// then called tud_audio_rx_done_post_read_cb(). On the esp32 port
+// tud_task() runs in the MicroPython task, through the scheduler, so the
+// endpoint stayed unarmed until the interpreter got round to it, and every
+// packet that arrived meanwhile was lost: 5 % of the stream with the
+// interpreter busy, heard as a tick every 20 ms or so. From 0.19 the driver
+// does all of that in the USB interrupt (audiod_xfer_isr) and calls
+// tud_audio_rx_done_isr() from there, so the interpreter is no longer on
+// the path at all.
+//
+// Either way this does only what is safe in an interrupt: two counters and a
+// task notification. No MicroPython, no FIFO reads, nothing that blocks.
+//
+// Explicit feedback is off (tud_audio_feedback_params_cb below), so a FIFO
+// nobody drains no longer stalls the host: it simply fills. TinyUSB's FIFO
+// is overwritable and drops the oldest audio when full. The high-water check
+// only counts that case for uac_stats(); when the only consumer is Python
+// (uac_pump.py) or there is none, that count is the "fell behind" signal.
+//
+// An earlier version shed the FIFO down to half here when nothing else was
+// reading it. That reads the FIFO, which an ISR must not do while Python may
+// be reading it too, so it went when this moved into the interrupt.
 #define USBIF_UAC_HIGH_WATER (CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ * 3 / 4)
 
-bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received,
-    uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting) {
-    (void)rhport;
+static inline void usbif_uac_on_rx(uint16_t n_bytes_received) {
     usbif_uac_rx_packets++;
     usbif_uac_rx_bytes += n_bytes_received;
-    (void)func_id;
-    (void)ep_out;
-    (void)cur_alt_setting;
-
-    // Only when no C pump exists. tud_audio_read() has one consumer by design,
-    // and this guard reading the same FIFO makes a second one -- it shed 371
-    // blocks out from under the pump and halved throughput. The pump therefore
-    // carries its own overflow guard, in its own loop, and this one covers the
-    // case where the only consumer is Python or there is none at all.
     // Wake the C pump the instant audio lands, so it never has to sleep
     // through a FIFO smaller than a scheduler tick.
     if (usbif_pump_is_running()) {
         usbif_pump_notify();
-        return true;
-    }
-
-    if (tud_audio_available() > USBIF_UAC_HIGH_WATER) {
-        static uint8_t sink[64];
+    } else if (tud_audio_available() > USBIF_UAC_HIGH_WATER) {
         usbif_uac_overflows++;
-        while (tud_audio_available() > USBIF_UAC_HIGH_WATER / 2) {
-            if (!tud_audio_read(sink, sizeof(sink))) {
-                break;
-            }
-        }
     }
+}
+
+#if TUSB_VERSION_NUMBER >= 1900
+bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received,
+    uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting) {
+    (void)rhport;
+    (void)func_id;
+    (void)ep_out;
+    (void)cur_alt_setting;
+    usbif_uac_on_rx(n_bytes_received);
     return true;
 }
+#else
+bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received,
+    uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting) {
+    (void)rhport;
+    (void)func_id;
+    (void)ep_out;
+    (void)cur_alt_setting;
+    usbif_uac_on_rx(n_bytes_received);
+    return true;
+}
+#endif
 
 void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt_itf,
     audio_feedback_params_t *feedback_param) {
