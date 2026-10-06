@@ -11,7 +11,7 @@ Run it on a board with a display and a camera on its host port::
 
 **MJPEG when ``jpegio`` is present.** A webcam offers far better resolutions
 in MJPEG than uncompressed -- on the bench camera, 640x480 against 176x144 --
-so MJPEG is preferred when the firmware has ``jpegio`` (displayif). Frames
+so MJPEG is preferred when the firmware has ``jpegio`` (micropython-pydevices' jpegio module). Frames
 arrive as whole JPEGs; ``jpegio.JpegDecoder`` sniffs SOI only, which is what
 UVC needs (a UVC MJPEG frame is not JFIF-first, so LVGL's ``is_jpg()`` rejects
 it). Without ``jpegio`` the example falls back to uncompressed YUY2, converted
