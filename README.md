@@ -209,28 +209,24 @@ silence, because the mechanism it replaces failed silently.
 ## Building
 
 usbif does its work on the ESP32-S2, S3 and P4, the parts with a USB OTG
-controller; the CMake glue skips every other esp32 part and rp2. Two steps come
-first, and skipping them builds a module whose USB functions are silently
-absent rather than one that fails loudly:
+controller; the CMake glue skips every other esp32 part and rp2. One step
+comes first, and skipping it builds a module whose USB functions are silently
+absent rather than one that fails loudly: **apply the patches** to your
+MicroPython tree. The device functions reach the host through hooks this
+module adds to MicroPython's shared TinyUSB glue, and the host side needs the
+esp32 OTG helper. All four apply to MicroPython v1.29.0:
 
-1. **Apply the patches** to your MicroPython tree. The device functions reach
-   the host through hooks this module adds to MicroPython's shared TinyUSB
-   glue, and the host side needs the esp32 OTG helper. All four apply to
-   MicroPython v1.29.0:
+```bash
+/path/to/usbif/apply_patches.sh --apply /path/to/micropython   # --status to check, --revert to undo
+```
 
-   ```bash
-   /path/to/usbif/apply_patches.sh --apply /path/to/micropython   # --status to check, --revert to undo
-   ```
-
-2. **Point the board at the extension header**, by adding this line to your
-   board's `mpconfigboard.h`. It is board integration rather than module code;
-   the esp32 boards in
-   [micropython-pydevices](https://github.com/PyDevices/micropython-pydevices)
-   already carry it, if you would rather start from one of those:
-
-   ```c
-   #define MICROPY_HW_USB_EXT_TUSB_CONFIG "usbif_tusb_ext.h"
-   ```
+Your board needs nothing of its own: the CMake glue defines the TinyUSB
+extension header and MSC for the build itself. The ESP-IDF settings the host
+side wants (hub support, a larger control-transfer buffer, and on the S3 a
+FIFO split that favours IN) are in [sdkconfig](sdkconfig) and
+[sdkconfig.esp32s3](sdkconfig.esp32s3). micropython-pydevices' `build_mp.py`
+appends them whenever usbif is selected; add them to your board's
+`SDKCONFIG_DEFAULTS` otherwise.
 
 The sound card wants TinyUSB 0.19 or later, which re-arms its endpoint in
 the USB interrupt. On the older TinyUSB that MicroPython 1.29's esp32 port

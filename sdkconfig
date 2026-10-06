@@ -1,0 +1,13 @@
+# usbif's USB host settings, appended to every esp32 build that selects usbif
+# (micropython-pydevices' build_mp.py finds this file by name).
+#
+# External hub support is off by default upstream, which makes a hub
+# enumerate as a device the host stack cannot use with everything behind it
+# invisible; a powered hub is also how a board that cannot source
+# VBUS reaches a bus-powered peripheral at all. The control-transfer buffer is
+# raised from IDF's 256-byte default because IDF allocates one per attached
+# device and refuses any device whose configuration descriptor is larger: a
+# USB audio CODEC publishes 1191 bytes, the bench camera 2306, and at the
+# default they never enumerate -- no error, no event, just absent.
+CONFIG_USB_HOST_HUBS_SUPPORTED=y
+CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=4096
