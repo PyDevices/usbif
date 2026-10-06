@@ -77,6 +77,20 @@ if(ESP_PLATFORM)
     # an implicit traceISR_EXIT_TO_SCHEDULER. Kitchen-sink builds never saw it
     # because another module's glue defines it; usbif built on its own did.
     target_compile_definitions(usermod_usbif INTERFACE ESP_PLATFORM=1)
+
+    # Extend TinyUSB's device configuration (descriptor and class config come
+    # from this module) and turn on MSC, whose block callbacks live here. These
+    # were a board header's lines until 2026-10-05; as compile definitions any
+    # board can build usbif with no header of its own. Both halves need them:
+    # MicroPython's sources (through usermod) and the TinyUSB component, which
+    # compiles MicroPython's tusb_config.h but never sees the board's -D list.
+    set(USBIF_TUSB_DEFS
+        MICROPY_HW_USB_EXT_TUSB_CONFIG="usbif_tusb_ext.h"
+        MICROPY_HW_USB_MSC=1)
+    target_compile_definitions(usermod_usbif INTERFACE ${USBIF_TUSB_DEFS})
+    if(usbif_tusb_lib)
+        target_compile_definitions(${usbif_tusb_lib} PRIVATE ${USBIF_TUSB_DEFS})
+    endif()
 endif()
 
 target_link_libraries(usermod INTERFACE usermod_usbif)
