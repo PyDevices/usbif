@@ -68,6 +68,14 @@ HID at a fixed endpoint 6). `examples/costume_selftest.py` lists which
 combinations the board you run it on can wear. The P4's high-speed
 controller drives IN endpoints 1 to 7, so every combination fits there.
 
+To show what the sound card is playing as a spectrum, attach audiodsp's
+[`audiometer`](https://github.com/PyDevices/audiodsp/tree/main/src/audiometer)
+to it: `audiometer.Meter(32).attach(audiometer.UAC)`, then read `levels()` at
+your frame rate. The pump feeds the meter in C, on its own core. This was
+`uac_pump_meter()` and `uac_pump_levels()` until the meter moved to audiodsp;
+usbif finds it through a weak symbol, so a firmware without audiodsp still
+builds and pumps.
+
 Also working, and the foundation the rest builds on:
 
 - the portable API and its Linux and Windows desktop backends, in `lib/usbif`,

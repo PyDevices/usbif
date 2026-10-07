@@ -42,7 +42,10 @@
 
 #include "py/runtime.h"
 
-#include "usbif_meter.h"
+// The spectrum meter is audiodsp's audiometer now. It is found by a weak
+// symbol, so a firmware with usbif and no audiodsp builds and pumps as before.
+extern void audiometer_uac_feed(const int16_t *frames, uint32_t n, uint32_t channels, uint32_t rate)
+__attribute__((weak));
 
 // Host volume and mute as one linear Q16 multiplier, maintained by the
 // control layer in usbif_uac.c.
@@ -256,11 +259,13 @@ static void usbif_pump_task(void *arg) {
             memcpy(carry, block + usable, carry_len);
         }
 
-        // The spectrum meter looks at the host's frames before they are
-        // mixed down and scaled for the wire (usbif_meter.c). Off, it costs
-        // one flag test.
-        usbif_meter_feed((const int16_t *)(void *)block, usable / frame_bytes,
-            usbif_src_channels, host_rate);
+        // audiometer (audiodsp) looks at the host's frames before they are
+        // mixed down and scaled for the wire, when a Meter is attached to
+        // audiometer.UAC. With none attached it costs a call and a load.
+        if (audiometer_uac_feed) {
+            audiometer_uac_feed((const int16_t *)(void *)block, usable / frame_bytes,
+                usbif_src_channels, host_rate);
+        }
 
         uint16_t out_bytes = usable;
         // Host volume and mute, as one Q16 multiplier maintained by the
