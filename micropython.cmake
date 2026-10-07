@@ -38,7 +38,6 @@ target_sources(usermod_usbif INTERFACE
     ${USBIF_SRC_DIR}/mod_usbif.c
     ${USBIF_SRC_DIR}/usbif_uac.c
     ${USBIF_SRC_DIR}/usbif_i2s.c
-    ${USBIF_SRC_DIR}/usbif_meter.c
     ${USBIF_SRC_DIR}/usbif_host.c
     ${USBIF_SRC_DIR}/usbif_host_cdc.c
     ${USBIF_SRC_DIR}/usbif_host_hid.c
