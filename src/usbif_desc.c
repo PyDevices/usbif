@@ -152,7 +152,7 @@ static const usbif_fn_block_t usbif_blocks[] = {
     { USBIF_FN_VIDEO, USBIF_OFF_VIDEO, USBIF_LEN_VIDEO, 2, false, true  },
 };
 
-// The advertised set at boot: CDC alone, by decision (usbif#14, Brad,
+// The advertised set at boot: CDC alone, by decision (usbif#14,
 // 2026-09-23). A board that always enumerates as a sound card or an
 // instrument is not merely untidy -- a host will make it the default device
 // and stall its audio engine when nothing aboard is draining the stream
