@@ -192,6 +192,8 @@ own patch), and
 `examples/costume_selftest.py` confirms **31 of 31** on the S3 as well.
 The API design is in [`docs/api-sketch.md`](docs/api-sketch.md).
 
+What's planned next is in [ROADMAP.md](ROADMAP.md).
+
 ## Why the events are drained rather than delivered
 
 The design decision most likely to surprise a reader is that USB events are

@@ -9,7 +9,7 @@ drives a commercial USB mic (or any UAC capture device) through
 
 Prints peak and RMS over the captured buffer so you can see that real audio
 arrived, not silence. Verified originally against a C-Media USB mic and
-Brad's voice (3,014 packets, zero dropped).
+a speaking voice (3,014 packets, zero dropped).
 """
 
 import time
