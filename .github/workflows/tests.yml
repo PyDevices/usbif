@@ -1,8 +1,19 @@
 name: Tests
 
+# Changes only to docs/, the roadmap or the license can't change this result,
+# so they don't run it. The READMEs are checked by the suite, so they still do.
 on:
   push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'ROADMAP.md'
+      - 'LICENSE'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'ROADMAP.md'
+      - 'LICENSE'
 
 jobs:
   ringbuf:
