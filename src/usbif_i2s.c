@@ -39,6 +39,7 @@
 #include "esp_timer.h"
 #include "esp_attr.h"
 #include <stdlib.h>
+#include <string.h>
 
 #include "py/runtime.h"
 
@@ -194,6 +195,128 @@ bool usbif_pump_tap_arm(void) {
     return true;
 }
 
+// Explicit feedback (usbif#40). The host's clock and the codec's are never
+// quite the same: measured on the P4 against Windows, a 44.1 kHz host sent
+// 44,129 frames a second to a wire that took 44,100, and at 48 kHz the board
+// was the faster one. With nothing reconciling them, the I2S queue slowly
+// fills (the pump's writes time out and drop samples) or empties (the DMA
+// plays silence). Either is a tiny click every second or so.
+//
+// Both rates are measured here on one clock, the board's. The codec's rate
+// on that clock is fixed (one crystal), so it is estimated from every DMA
+// byte since the stream started, and its error shrinks as the stream runs.
+// The host's clock against the board's is fixed too, and the host sends
+// exactly what the feedback value asks (Windows does), so that ratio is the
+// frames received against the frames asked for, also accumulated. The value
+// that makes the two clocks agree follows from those two numbers. The FIFO
+// level can't steer this, because the pump empties the FIFO the instant a
+// packet lands (see tud_audio_feedback_params_cb in usbif_uac.c).
+//
+// Matching rates stops the drift but leaves the queue wherever it was, so a
+// write timeout (queue full) or a starved DMA buffer (empty) also adds a
+// small, decaying offset the other way. Values stay within 0.5 % of nominal,
+// well inside the one sample per packet the USB audio spec and Windows allow.
+#define USBIF_FB_PERIOD_US (250000)
+#define USBIF_FB_SETTLE_US (8000000)    // nominal until the estimates mean something
+#define USBIF_FB_NUDGE (0.0002)
+#define USBIF_FB_NUDGE_MAX (0.001)
+#define USBIF_FB_NUDGE_DECAY (0.99)     // per period: about a 25 s time constant
+#define USBIF_FB_MAX (0.005)
+extern uint32_t usbif_uac_rx_bytes;
+volatile bool usbif_fb_enabled = true;
+volatile uint32_t usbif_fb_value;       // 16.16 samples per (micro)frame, 0 = none sent
+volatile int32_t usbif_fb_ppm;          // the value's offset from nominal
+volatile int32_t usbif_fb_level_bytes;  // the clock ratio's offset, ppm (diagnostic)
+static uint32_t usbif_fb_frame_bytes;
+static int64_t usbif_fb_t0, usbif_fb_last_us;
+static uint32_t usbif_fb_dma0, usbif_fb_rx0, usbif_fb_last_rx;
+static double usbif_fb_asked;           // host frames asked for since t0
+static double usbif_fb_scale;           // the value in effect, over nominal
+static double usbif_fb_nudge;
+static uint32_t usbif_fb_last_timeouts, usbif_fb_last_starved;
+
+static void usbif_fb_reset(void) {
+    usbif_fb_t0 = 0;
+    usbif_fb_last_us = 0;
+    usbif_fb_scale = 1.0;
+    usbif_fb_nudge = 0.0;
+}
+
+static void usbif_fb_update(uint32_t host_rate) {
+    const int64_t now = esp_timer_get_time();
+    if (usbif_fb_last_us != 0 && now - usbif_fb_last_us < USBIF_FB_PERIOD_US) {
+        return;
+    }
+    const uint32_t rx = usbif_uac_rx_bytes;
+    const uint32_t dma = usbif_pump_dma_bytes;
+    const bool streaming = usbif_fb_last_us != 0 && rx != usbif_fb_last_rx;
+    const double dt = usbif_fb_last_us ? (double)(now - usbif_fb_last_us) / 1e6 : 0.0;
+    usbif_fb_last_us = now;
+    usbif_fb_last_rx = rx;
+    if (!usbif_fb_enabled || host_rate == 0 || !streaming) {
+        // Off, or no stream: start again from nominal when one arrives.
+        if (usbif_fb_value != 0) {
+            tud_audio_fb_set(0);    // hosts read 0 as "no feedback": nominal rate
+            usbif_fb_value = 0;
+            usbif_fb_ppm = 0;
+        }
+        usbif_fb_t0 = 0;
+        usbif_fb_scale = 1.0;
+        usbif_fb_nudge = 0.0;
+        return;
+    }
+    if (usbif_fb_t0 == 0) {
+        usbif_fb_t0 = now;
+        usbif_fb_dma0 = dma;
+        usbif_fb_rx0 = rx;
+        usbif_fb_asked = 0.0;
+        usbif_fb_last_timeouts = usbif_pump_timeouts;
+        usbif_fb_last_starved = usbif_pump_dma_starved;
+        return;
+    }
+    usbif_fb_asked += (double)host_rate * usbif_fb_scale * dt;
+
+    const uint32_t timeouts = usbif_pump_timeouts;
+    const uint32_t starved = usbif_pump_dma_starved;
+    const bool full = timeouts != usbif_fb_last_timeouts;
+    const bool empty = starved != usbif_fb_last_starved;
+    usbif_fb_last_timeouts = timeouts;
+    usbif_fb_last_starved = starved;
+    usbif_fb_nudge *= USBIF_FB_NUDGE_DECAY;
+    if (full && !empty && usbif_fb_nudge > -USBIF_FB_NUDGE_MAX) {
+        usbif_fb_nudge -= USBIF_FB_NUDGE;
+    } else if (empty && !full && usbif_fb_nudge < USBIF_FB_NUDGE_MAX) {
+        usbif_fb_nudge += USBIF_FB_NUDGE;
+    }
+
+    const double elapsed = (double)(now - usbif_fb_t0) / 1e6;
+    double scale = 1.0;
+    if (now - usbif_fb_t0 >= USBIF_FB_SETTLE_US && usbif_fb_asked > 0.0) {
+        // The codec's rate in host frames per board second.
+        const double used = (double)(uint32_t)(dma - usbif_fb_dma0)
+            / (double)(usbif_fb_frame_bytes ? usbif_fb_frame_bytes : 2)
+            * (double)usbif_decimate / elapsed;
+        // Host seconds per board second: frames received over frames asked.
+        const double got = (double)(uint32_t)(rx - usbif_fb_rx0) / (2.0 * usbif_src_channels);
+        const double k = got / usbif_fb_asked;
+        scale = used / (k * (double)host_rate);
+        usbif_fb_level_bytes = (int32_t)((k - 1.0) * 1e6);
+    }
+    scale += usbif_fb_nudge;
+    if (scale > 1.0 + USBIF_FB_MAX) {
+        scale = 1.0 + USBIF_FB_MAX;
+    } else if (scale < 1.0 - USBIF_FB_MAX) {
+        scale = 1.0 - USBIF_FB_MAX;
+    }
+    usbif_fb_scale = scale;
+    const uint32_t frame_div = (tud_speed_get() == TUSB_SPEED_HIGH) ? 8000 : 1000;
+    const double nominal = (double)host_rate * 65536.0 / (double)frame_div;
+    const uint32_t fb = (uint32_t)(nominal * scale);
+    tud_audio_fb_set(fb);
+    usbif_fb_value = fb;
+    usbif_fb_ppm = (int32_t)((scale - 1.0) * 1e6);
+}
+
 static void usbif_pump_task(void *arg) {
     (void)arg;
     static uint8_t block[USBIF_PUMP_BLOCK + 8];
@@ -216,7 +339,9 @@ static void usbif_pump_task(void *arg) {
             usbif_pump_host_rate = host_rate;
             usbif_pump_retunes++;
             carry_len = 0;
+            usbif_fb_reset();
         }
+        usbif_fb_update(host_rate);
         // No overflow guard here, deliberately. The pump reads a block larger
         // than the whole FIFO on every iteration, so while it is running the
         // FIFO cannot accumulate: it is drained to empty each time round. An
@@ -490,6 +615,9 @@ int usbif_pump_start(int i2s_id, int bclk, int ws, int dout, int mclk,
     usbif_pump_timeouts = 0;
     usbif_pump_shed = 0;
     usbif_pump_retunes = 0;
+    usbif_fb_frame_bytes = usbif_sink_channels * (bits == 32 ? 4 : (bits == 24 ? 3 : 2));
+    usbif_fb_value = 0;
+    usbif_fb_reset();
     usbif_pump_running = true;
 
     if (xTaskCreate(usbif_pump_task, "usbif_uac", USBIF_PUMP_TASK_STACK, NULL,

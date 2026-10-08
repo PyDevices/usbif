@@ -345,6 +345,9 @@ extern uint32_t usbif_pump_retunes;
 extern uint32_t usbif_pump_wire_rate(void);
 extern volatile uint32_t usbif_pump_dma_bytes, usbif_pump_dma_starved;
 extern int64_t usbif_pump_dma_elapsed_us(void);
+extern volatile bool usbif_fb_enabled;
+extern volatile uint32_t usbif_fb_value;
+extern volatile int32_t usbif_fb_ppm, usbif_fb_level_bytes;
 extern const int16_t *usbif_pump_tap(uint32_t *n);
 extern bool usbif_pump_tap_arm(void);
 extern uint32_t usbif_uac_rx_packets, usbif_uac_rx_bytes;
@@ -552,19 +555,41 @@ static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_pump_rate_obj, usbif_uac_pump_rate);
 // starved buffers, microseconds since the pump opened I2S).
 static mp_obj_t usbif_uac_pump_clock(void) {
     #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
-    mp_obj_t items[5] = {
+    mp_obj_t items[8] = {
         mp_obj_new_int_from_uint(usbif_uac_rx_packets),
         mp_obj_new_int_from_uint(usbif_uac_rx_bytes),
         mp_obj_new_int_from_uint(usbif_pump_dma_bytes),
         mp_obj_new_int_from_uint(usbif_pump_dma_starved),
         mp_obj_new_int_from_ll(usbif_pump_dma_elapsed_us()),
+        // The explicit feedback (usbif#40): the value last sent, in 16.16
+        // samples per (micro)frame (0 when off), its offset from nominal in
+        // ppm, and the last measured consumed/delivered rate error in ppm.
+        mp_obj_new_int_from_uint(usbif_fb_value),
+        mp_obj_new_int(usbif_fb_ppm),
+        mp_obj_new_int(usbif_fb_level_bytes),
     };
-    return mp_obj_new_tuple(5, items);
+    return mp_obj_new_tuple(8, items);
     #else
     return mp_const_none;
     #endif
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_uac_pump_clock_obj, usbif_uac_pump_clock);
+
+// uac_feedback(): whether the sound card sends explicit feedback (usbif#40).
+// uac_feedback(False) sends none, so the host plays at its nominal rate.
+static mp_obj_t usbif_uac_feedback(size_t n_args, const mp_obj_t *args) {
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    if (n_args) {
+        usbif_fb_enabled = mp_obj_is_true(args[0]);
+    }
+    return mp_obj_new_bool(usbif_fb_enabled);
+    #else
+    (void)n_args;
+    (void)args;
+    return mp_const_none;
+    #endif
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(usbif_uac_feedback_obj, 0, 1, usbif_uac_feedback);
 
 // uac_pump_tap(): the samples last captured going to I2S, as bytes (int16
 // mono), or None while a capture is still filling. uac_pump_tap(True) arms a
@@ -1704,6 +1729,7 @@ static const mp_rom_map_elem_t usbif_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_uac_pump_stats), MP_ROM_PTR(&usbif_uac_pump_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_rate), MP_ROM_PTR(&usbif_uac_pump_rate_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_clock), MP_ROM_PTR(&usbif_uac_pump_clock_obj) },
+    { MP_ROM_QSTR(MP_QSTR_uac_feedback), MP_ROM_PTR(&usbif_uac_feedback_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_pump_tap), MP_ROM_PTR(&usbif_uac_pump_tap_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_available), MP_ROM_PTR(&usbif_uac_available_obj) },
     { MP_ROM_QSTR(MP_QSTR_uac_volume), MP_ROM_PTR(&usbif_uac_volume_obj) },
