@@ -11,6 +11,12 @@ Starts the sound card as ``examples/soundcard.py`` does, then prints one
   99.5 % or more.
 - ``dma_rate``: the rate the I2S DMA actually consumed, in frames a second:
   the clock the codec really gets.
+- ``timeouts``: pump writes that found the I2S queue full and dropped
+  samples. With the host's clock faster than the codec's and no feedback,
+  this ticks every second or so (usbif#40).
+- ``feedback``: the explicit feedback value sent to the host (16.16 samples
+  per (micro)frame, 0 when off) and its offset from nominal.
+  ``_usbif.uac_feedback(False)`` turns it off for an A/B run.
 - ``pitch``, every third window: the pitch of the samples handed to I2S,
   from the median period between rising zero crossings. A splice disturbs
   one cycle, not the median. ``heard`` scales that by the DMA rate against
@@ -98,9 +104,10 @@ def main():
             if k % PITCH_EVERY == PITCH_EVERY - 1:
                 _usbif.uac_pump_tap(True)
             print("MEASURE host=%d wire=%d pkts/s=%.1f pump%%=%.3f dma_rate=%.1f "
-                  "starved=%d timeouts=%d%s"
+                  "starved=%d timeouts=%d%s%s"
                   % (host, wire, pk, 100 * pump / (2 * wire) if wire else 0,
-                     dma / 2, cur[4] - prev[4], cur[6] - prev[6], pitch))
+                     dma / 2, cur[4] - prev[4], cur[6] - prev[6], pitch,
+                     " feedback=%d (%+d ppm)" % (c[5], c[6]) if len(c) > 5 else ""))
         prev = cur
 
 
