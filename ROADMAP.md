@@ -19,8 +19,8 @@ on the boards people actually use.
 
 - CDC, HID and MIDI device move to MicroPython's own `usb-device` packages on
   `machine.USBDevice`, and usbif's versions retire.
-- Audio, video and mass storage stay in C on TinyUSB's class drivers, since
-  isochronous endpoints can't be serviced from Python.
+- Audio and video stay in C on TinyUSB's class drivers, since isochronous
+  endpoints can't be serviced from Python. Mass storage stays in C for speed.
 - Offer MicroPython the small TinyUSB hooks usbif patches in today, so usbif
   builds against an unmodified MicroPython.
 - usbif's Python layer moves into pydevices as `usbdev`, beside `displaydev`
