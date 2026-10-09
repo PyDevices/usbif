@@ -484,6 +484,27 @@ uint8_t mp_usbd_builtin_itf_max(void) {
     return usbif_itf_count;
 }
 
+// The first endpoint number left for MicroPython's runtime USB device
+// (`machine.USBDevice`, through patch 0006): one past the highest number the
+// costume uses, IN or OUT, since a runtime interface takes the same number in
+// both directions. The costume's endpoints are renumbered per costume, so the
+// compile-time USBD_EP_BUILTIN_MAX would describe a configuration that is not
+// being worn. A costume using no endpoints leaves 1, because 0 is control.
+uint8_t mp_usbd_builtin_ep_max(void) {
+    usbif_build_desc();
+    const uint16_t total = (uint16_t)(usbif_desc_buf[2] | (usbif_desc_buf[3] << 8));
+    uint8_t highest = 0;
+    for (uint16_t o = TUD_CONFIG_DESC_LEN;
+         o + 2u <= total && usbif_desc_buf[o] >= 2 && o + usbif_desc_buf[o] <= total;
+         o = (uint16_t)(o + usbif_desc_buf[o])) {
+        const uint8_t *d = usbif_desc_buf + o;
+        if (d[1] == TUSB_DESC_ENDPOINT && d[0] >= 7 && (d[2] & 0x0F) > highest) {
+            highest = d[2] & 0x0F;
+        }
+    }
+    return (uint8_t)(highest + 1);
+}
+
 // Structural validation of whatever the assembler just produced. A host
 // discovers a malformed descriptor by refusing the device, days later and
 // with no explanation; this finds the same faults in microseconds and says

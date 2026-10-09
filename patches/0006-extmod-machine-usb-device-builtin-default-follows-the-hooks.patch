@@ -1,0 +1,151 @@
+From: PyDevices usbif
+Date: Fri, 9 Oct 2026 00:00:00 +0000
+Subject: [PATCH] extmod/machine_usb_device: describe the built-in
+ configuration as it is now, not as it was compiled
+
+Purpose: `machine.USBDevice.BUILTIN_DEFAULT` tells Python's runtime USB
+device (micropython-lib's `usb-device`) what the built-in drivers occupy:
+`itf_max`, `ep_max`, `str_max`, `desc_dev` and `desc_cfg`. A runtime
+interface is numbered after them and appended to that configuration. They
+are ROM constants, so on a build whose user C module varies the built-in
+configuration at runtime (0003) they describe the compile-time superset
+while TinyUSB serves the module's smaller one. The runtime descriptor then
+lists every compiled-in interface, `runtime_dev_open()` judges ownership
+against the worn configuration's count, and the Python interface's
+endpoints are never opened: `init(..., builtin_driver=True)` returns, the
+interface never opens, and the host sees a device in an error state.
+
+So BUILTIN_DEFAULT becomes an instance whose type reads the hooks on every
+access: `itf_max` from mp_usbd_builtin_itf_max(), `desc_cfg` from
+mp_usbd_builtin_desc_cfg_get() sized by its wTotalLength, `desc_dev` from
+mp_usbd_builtin_desc_dev_get(), and `ep_max` from a new weak hook,
+mp_usbd_builtin_ep_max(), defaulting to USBD_EP_BUILTIN_MAX. Without a
+module overriding them every value is the compile-time one, as before.
+
+Provenance: written for usbif#26, 2026-10-09.
+Upstream-version range: authored against v1.29.0.
+Order: applies after 0003.
+Test: on a usbif image wearing the CDC costume, micropython-lib's
+usb-device-mouse with `init(m, builtin_driver=True)` opens and moves the
+host's pointer; before this patch it never opened.
+
+--- a/extmod/machine_usb_device.c
++++ b/extmod/machine_usb_device.c
+@@ -242,24 +242,49 @@
+ #if HAS_BUILTIN_DRIVERS
+ // BUILTIN_DEFAULT Python object holds properties of the built-in USB configuration
+ // (i.e. values used by the C implementation of TinyUSB devices.)
+-static const MP_DEFINE_BYTES_OBJ(builtin_default_desc_cfg_obj,
+-    mp_usbd_builtin_desc_cfg, MP_USBD_BUILTIN_DESC_CFG_LEN);
+-
+-static const mp_rom_map_elem_t usb_device_builtin_default_dict_table[] = {
+-    { MP_ROM_QSTR(MP_QSTR_itf_max), MP_OBJ_NEW_SMALL_INT(USBD_ITF_BUILTIN_MAX) },
+-    { MP_ROM_QSTR(MP_QSTR_ep_max), MP_OBJ_NEW_SMALL_INT(USBD_EP_BUILTIN_MAX) },
+-    { MP_ROM_QSTR(MP_QSTR_str_max), MP_OBJ_NEW_SMALL_INT(USBD_STR_BUILTIN_MAX) },
+-    { MP_ROM_QSTR(MP_QSTR_desc_dev), MP_ROM_PTR(&builtin_default_desc_dev_obj)  },
+-    { MP_ROM_QSTR(MP_QSTR_desc_cfg), MP_ROM_PTR(&builtin_default_desc_cfg_obj) },
+-};
+-static MP_DEFINE_CONST_DICT(usb_device_builtin_default_dict, usb_device_builtin_default_dict_table);
++//
++// Read through the mp_usbd_builtin_*() hooks on every access rather than held
++// as ROM constants, so that a user C module which varies the built-in
++// configuration at runtime is described as it is now, not as it was compiled.
++// A runtime interface is numbered after `itf_max` and `ep_max` and appended to
++// `desc_cfg`; if those describe the compile-time superset while TinyUSB serves
++// the module's smaller configuration, the runtime descriptor claims
++// interfaces nobody opens and the Python interface's endpoints are never
++// opened. Without such a module the hooks return the compile-time values, so
++// what Python reads is unchanged.
++static void usb_device_builtin_default_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
++    (void)self_in;
++    if (dest[0] != MP_OBJ_NULL) {
++        return; // read-only
++    }
++    if (attr == MP_QSTR_itf_max) {
++        dest[0] = MP_OBJ_NEW_SMALL_INT(mp_usbd_builtin_itf_max());
++    } else if (attr == MP_QSTR_ep_max) {
++        dest[0] = MP_OBJ_NEW_SMALL_INT(mp_usbd_builtin_ep_max());
++    } else if (attr == MP_QSTR_str_max) {
++        dest[0] = MP_OBJ_NEW_SMALL_INT(USBD_STR_BUILTIN_MAX);
++    } else if (attr == MP_QSTR_desc_dev) {
++        dest[0] = mp_obj_new_bytes(mp_usbd_builtin_desc_dev_get(), sizeof(tusb_desc_device_t));
++    } else if (attr == MP_QSTR_desc_cfg) {
++        const uint8_t *cfg = mp_usbd_builtin_desc_cfg_get();
++        size_t len = cfg[2] | (cfg[3] << 8); // wTotalLength
++        if (len > MP_USBD_BUILTIN_DESC_CFG_LEN) {
++            len = MP_USBD_BUILTIN_DESC_CFG_LEN;
++        }
++        dest[0] = mp_obj_new_bytes(cfg, len);
++    }
++}
+ 
+ MP_DEFINE_CONST_OBJ_TYPE(
+     mp_type_usb_device_builtin_default,
+     MP_QSTR_BUILTIN_DEFAULT,
+     MP_TYPE_FLAG_NONE,
+-    locals_dict, &usb_device_builtin_default_dict
++    attr, usb_device_builtin_default_attr
+     );
++
++// The constant itself is an instance, because only an instance's type can
++// supply an attribute handler; BUILTIN_NONE stays a type, as before.
++const mp_obj_base_t mp_usb_device_builtin_default_obj = { &mp_type_usb_device_builtin_default };
+ #endif // HAS_BUILTIN_DRIVERS
+ 
+ // BUILTIN_NONE holds properties for no enabled built-in USB device support
+@@ -293,18 +318,18 @@
+     // No builtin-in drivers, so BUILTIN_DEFAULT is BUILTIN_NONE
+     { MP_ROM_QSTR(MP_QSTR_BUILTIN_DEFAULT), MP_ROM_PTR(&mp_type_usb_device_builtin_none) },
+     #else
+-    { MP_ROM_QSTR(MP_QSTR_BUILTIN_DEFAULT), MP_ROM_PTR(&mp_type_usb_device_builtin_default) },
++    { MP_ROM_QSTR(MP_QSTR_BUILTIN_DEFAULT), MP_ROM_PTR(&mp_usb_device_builtin_default_obj) },
+ 
+     // Specific driver constant names are to support future switching of built-in drivers,
+     // but currently only one is present and it maps directly to BUILTIN_DEFAULT
+     #if MICROPY_HW_USB_CDC && !MICROPY_HW_USB_MSC
+-    { MP_ROM_QSTR(MP_QSTR_BUILTIN_CDC), MP_ROM_PTR(&mp_type_usb_device_builtin_default) },
++    { MP_ROM_QSTR(MP_QSTR_BUILTIN_CDC), MP_ROM_PTR(&mp_usb_device_builtin_default_obj) },
+     #endif
+     #if MICROPY_HW_USB_MSC && !MICROPY_HW_USB_CDC
+-    { MP_ROM_QSTR(MP_QSTR_BUILTIN_MSC), MP_ROM_PTR(&mp_type_usb_device_builtin_default) },
++    { MP_ROM_QSTR(MP_QSTR_BUILTIN_MSC), MP_ROM_PTR(&mp_usb_device_builtin_default_obj) },
+     #endif
+     #if MICROPY_HW_USB_CDC && MICROPY_HW_USB_MSC
+-    { MP_ROM_QSTR(MP_QSTR_BUILTIN_CDC_MSC), MP_ROM_PTR(&mp_type_usb_device_builtin_default) },
++    { MP_ROM_QSTR(MP_QSTR_BUILTIN_CDC_MSC), MP_ROM_PTR(&mp_usb_device_builtin_default_obj) },
+     #endif
+     #endif // !HAS_BUILTIN_DRIVERS
+ 
+--- a/shared/tinyusb/mp_usbd.h
++++ b/shared/tinyusb/mp_usbd.h
+@@ -108,6 +108,9 @@
+ // module that varies its interfaces at runtime therefore has to vary this
+ // too.
+ const void *mp_usbd_builtin_desc_dev_get(void);
++// The first endpoint number a runtime interface may use: one past the
++// highest the built-in configuration uses now.
++uint8_t mp_usbd_builtin_ep_max(void);
+ 
+ // Built-in USB device and configuration descriptor values
+ extern const tusb_desc_device_t mp_usbd_builtin_desc_dev;
+@@ -179,6 +182,7 @@
+ //
+ // (Currently not possible to change built-in drivers at runtime, just enable/disable.)
+ extern const mp_obj_type_t mp_type_usb_device_builtin_default;
++extern const mp_obj_base_t mp_usb_device_builtin_default_obj;
+ extern const mp_obj_type_t mp_type_usb_device_builtin_none;
+ 
+ // Return true if any built-in driver is enabled
+--- a/shared/tinyusb/mp_usbd_runtime.c
++++ b/shared/tinyusb/mp_usbd_runtime.c
+@@ -140,6 +140,10 @@
+     return USBD_ITF_BUILTIN_MAX;
+ }
+ 
++MP_WEAK uint8_t mp_usbd_builtin_ep_max(void) {
++    return USBD_EP_BUILTIN_MAX;
++}
++
+ #if (CFG_TUD_MAX_SPEED == OPT_MODE_HIGH_SPEED)
+ uint8_t const *tud_descriptor_device_qualifier_cb(void) {
+     return (const uint8_t *)&mp_usbd_builtin_desc_qual;
