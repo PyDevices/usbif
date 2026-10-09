@@ -34,6 +34,23 @@ def find_keyboard(host, timeout_ms=15000):
     return None
 
 
+def keyboard_report(buf, n):
+    """The 8-byte boot keyboard report in the first ``n`` bytes, or None.
+
+    A plain keyboard sends 8 bytes. One that shares its interface with a
+    mouse (a PyDevices board running ``hid_keyboard.py`` is one) puts a
+    report ID in front, so its keyboard reports are 9 bytes; read as boot
+    reports unstripped, the ID lands in the modifier byte and every key
+    comes with Left Ctrl held. Anything else, such as that interface's
+    mouse reports, isn't a keyboard report.
+    """
+    if n == 8:
+        return bytes(buf[:8])
+    if n == 9:
+        return bytes(buf[1:9])
+    return None
+
+
 def main(seconds=30):
     host = usbif.auto.host(classes=("hid",)).start()
     dev_id = find_keyboard(host)
@@ -45,13 +62,14 @@ def main(seconds=30):
     print("HID device", dev_id, "-- type on it for %d s" % seconds)
     host.hid_open(dev_id)
     decoder = KeyboardDecoder()
-    buf = bytearray(8)
+    buf = bytearray(64)
     t0 = time.ticks_ms()
     try:
         while time.ticks_diff(time.ticks_ms(), t0) < seconds * 1000:
             n = host.hid_read(buf)
-            if n >= 3:
-                for ev in decoder.feed(buf):
+            report = keyboard_report(buf, n) if n > 0 else None
+            if report is not None:
+                for ev in decoder.feed(report):
                     kind = "DOWN" if ev.type == events.KEYDOWN else "UP"
                     # Field names follow events.Key; fall back to repr if a
                     # firmware builds the record differently.
@@ -61,7 +79,7 @@ def main(seconds=30):
                     scan = getattr(ev, "scancode", None)
                     print("  %s %-12s key=0x%02x mod=0x%02x scancode=%s"
                           % (kind, name, key, mod, scan))
-            else:
+            elif n <= 0:
                 time.sleep_ms(5)
     finally:
         host.hid_close()
