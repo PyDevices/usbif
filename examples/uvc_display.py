@@ -50,9 +50,12 @@ IN_LIMIT = 600
 # 100 ns units, which is how UVC counts frame intervals throughout.
 INTERVALS = (2000000, 1333333, 1000000, 666666, 333333)   # 5, 7.5, 10, 15, 30 fps
 
+# False tries the uncompressed (YUY2) modes even when jpegio is present.
+PREFER_MJPEG = True
+
 try:
     import jpegio
-    _HAVE_JPEGIO = True
+    _HAVE_JPEGIO = PREFER_MJPEG
 except ImportError:
     jpegio = None
     _HAVE_JPEGIO = False
@@ -211,7 +214,7 @@ else:
     if _HAVE_JPEGIO:
         print("jpegio present -- preferring MJPEG")
     else:
-        print("jpegio absent -- uncompressed YUY2 only")
+        print("uncompressed YUY2 only (no jpegio, or PREFER_MJPEG is False)")
     blob = host.desc(dev_id)
     formats = uvc.formats(blob)
     alts = uvc.alt_settings(blob)
@@ -244,8 +247,23 @@ if picked is not None:
     _shown = 0
     _t0 = time.ticks_ms()
 
+    def _frame_shown():
+        global _shown
+        display_drv.show()
+        _shown += 1
+        if _shown % 25 == 0:
+            dt = time.ticks_diff(time.ticks_ms(), _t0)
+            print("%d frames, %.1f fps, stats %r"
+                  % (_shown, _shown * 1000 / dt, host.uvc_stats()))
+
     if fmt.encoding == "mjpeg":
-        decoder = jpegio.JpegDecoder()
+        # The P4's JPEG engine decodes a whole frame several times faster than
+        # TJpgDec; other chips refuse hardware=True, and an older jpegio
+        # doesn't know the keyword.
+        try:
+            decoder = jpegio.JpegDecoder(hardware=True)
+        except (OSError, TypeError):
+            decoder = jpegio.JpegDecoder()
         # Native-order RGB565, tight. Sized for the negotiated frame; a camera
         # that sends a larger JPEG than it advertised is refused by decode.
         rgb = bytearray(frame.width * frame.height * 2)
@@ -258,7 +276,6 @@ if picked is not None:
         src_stride = frame.width * 2
 
         def _tick(_=None):
-            global _shown
             n = host.uvc_read_frame(src)
             if n <= 0:
                 return
@@ -272,30 +289,28 @@ if picked is not None:
                 decoder.decode(rgb, scale=0)
             except Exception:
                 return
+            if scale == 1:
+                # The decoded frame is already the picture: one blit. Row by
+                # row cost one call per line, about 448 of them per frame.
+                display_drv.blit_rect(rgb, x0, y0, out_w, out_h)
+                _frame_shown()
+                return
             # Integer upscale row by row into the band, then blit.
             for sy in range(frame.height):
                 row = rgb_mv[sy * src_stride:(sy + 1) * src_stride]
-                if scale == 1:
-                    display_drv.blit_rect(row, x0, y0 + sy, out_w, 1)
-                else:
-                    # Expand horizontally into the first band row, then
-                    # replicate vertically.
-                    o = 0
-                    for px in range(0, src_stride, 2):
-                        pix = row[px:px + 2]
-                        for _k in range(scale):
-                            band_mv[o:o + 2] = pix
-                            o += 2
-                    for k in range(1, scale):
-                        band_mv[k * band_stride:(k + 1) * band_stride] = \
-                            band_mv[0:band_stride]
-                    display_drv.blit_rect(band, x0, y0 + sy * scale, out_w, scale)
-            display_drv.show()
-            _shown += 1
-            if _shown % 25 == 0:
-                dt = time.ticks_diff(time.ticks_ms(), _t0)
-                print("%d frames, %.1f fps, stats %r"
-                      % (_shown, _shown * 1000 / dt, host.uvc_stats()))
+                # Expand horizontally into the first band row, then
+                # replicate vertically.
+                o = 0
+                for px in range(0, src_stride, 2):
+                    pix = row[px:px + 2]
+                    for _k in range(scale):
+                        band_mv[o:o + 2] = pix
+                        o += 2
+                for k in range(1, scale):
+                    band_mv[k * band_stride:(k + 1) * band_stride] = \
+                        band_mv[0:band_stride]
+                display_drv.blit_rect(band, x0, y0 + sy * scale, out_w, scale)
+            _frame_shown()
 
     else:
         # Uncompressed YUY2 path.
@@ -305,6 +320,8 @@ if picked is not None:
         src_mv = memoryview(src)
         src_stride = frame.width * 2
         whole_frame = src_stride * frame.height
+        # The whole converted frame, for the one-blit path at scale 1.
+        rgb = bytearray(out_w * out_h * 2) if scale == 1 else None
 
         def _tick(_=None):
             """Blit a frame if one has arrived; cheap when none has.
@@ -313,13 +330,19 @@ if picked is not None:
             would be wrong: it owns the interpreter, so touch, the REPL and
             anything else the app is running never get a turn.
             """
-            global _shown
             n = host.uvc_read_frame(src)
             if n <= 0:
                 return
             # A short frame means the camera sent less than a whole picture.
             # Showing it would tear; skip and leave the last good frame up.
             if n < whole_frame:
+                return
+            if scale == 1:
+                # No widening, so the frame converts as one long row and
+                # goes to the display in one blit.
+                yuy2_row_to_rgb565(src, rgb, frame.width * frame.height, 1)
+                display_drv.blit_rect(rgb, x0, y0, out_w, out_h)
+                _frame_shown()
                 return
             for sy in range(frame.height):
                 yuy2_row_to_rgb565(src_mv[sy * src_stride:], band,
@@ -328,12 +351,7 @@ if picked is not None:
                     band_mv[k * band_stride:(k + 1) * band_stride] = \
                         band_mv[0:band_stride]
                 display_drv.blit_rect(band, x0, y0 + sy * scale, out_w, scale)
-            display_drv.show()
-            _shown += 1
-            if _shown % 25 == 0:
-                dt = time.ticks_diff(time.ticks_ms(), _t0)
-                print("%d frames, %.1f fps, stats %r"
-                      % (_shown, _shown * 1000 / dt, host.uvc_stats()))
+            _frame_shown()
 
     # 10 ms. Frames arrive every 200 ms at 5 fps, so nearly every tick returns
     # immediately.
