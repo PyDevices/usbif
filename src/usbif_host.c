@@ -207,6 +207,27 @@ static volatile bool usbif_host_tearing_down;
 // pretending a fresh host actually (re)started.
 static volatile bool usbif_host_task_wedged;
 
+bool usbif_host_is_wedged(void) {
+    return usbif_host_task_wedged;
+}
+
+// Teardown frees a device left stuck in enumeration by powering the root port
+// off (usbif#65). 0 builds the old teardown, which leaves the HCD installed in
+// that case; it exists to show the failure the fix removes.
+#ifndef USBIF_HOST_RELEASE_STUCK_DEVICES
+#define USBIF_HOST_RELEASE_STUCK_DEVICES (1)
+#endif
+
+// How many devices the host library still holds, enumerating ones included;
+// -1 if it isn't installed.
+static int usbif_host_lib_num_devices(void) {
+    usb_host_lib_info_t info;
+    if (usb_host_lib_info(&info) != ESP_OK) {
+        return -1;
+    }
+    return info.num_devices;
+}
+
 // Set by mod_usbif.c's host_start() before usbif_host_start_c() installs the
 // library, so it is always in place before the client callback can fire.
 // Defaults to "everything" rather than zero, so a device attaching before any
@@ -678,6 +699,57 @@ static void usbif_host_task(void *arg) {
     }
     printf("usbif_host: ALL_FREE %s after %d tick(s) (%d ms)\n",
         all_free_seen ? "seen" : "NOT seen -- timed out", free_wait_ticks, free_wait_ticks * 10);
+
+    // A device that stopped answering in the middle of enumeration (usbif#65:
+    // a webcam left streaming across a board reset, on a socket whose 5 V
+    // has no switch) can't be freed: the enumerator's control transfer to it
+    // has no timeout, so its pipe stays busy and ALL_FREE never comes. The
+    // device can also appear after ALL_FREE, when freeing a device that is
+    // still plugged in makes the hub enumerate it again. Either way
+    // usb_host_uninstall() can't finish, and it still returns ESP_OK: it
+    // tears its layers down inside ESP_ERROR_CHECK(), which this port builds
+    // as a no-op. The HCD stays installed and the next usb_host_install()
+    // fails with ESP_ERR_INVALID_STATE (0x103), which says nothing about why.
+    //
+    // Powering the root port off makes the hub driver treat the device as
+    // disconnected, which cancels the enumeration and frees it. If something
+    // is still held after that, uninstalling would leave the stack half torn
+    // down, so don't: mark the host wedged, and host_start() will say that
+    // the board needs a reset.
+    #if USBIF_HOST_RELEASE_STUCK_DEVICES
+    int held = usbif_host_lib_num_devices();
+    if (!all_free_seen || held != 0) {
+        printf("usbif_host: %d device(s) still held -- powering the root port off\n", held);
+        esp_err_t power_err = usb_host_lib_set_root_port_power(false);
+        printf("usbif_host: root port power off -> 0x%x\n", (unsigned)power_err);
+        int release_ticks = 0;
+        for (int i = 0; i < 100; i++) {
+            uint32_t flags = 0;
+            usb_host_lib_handle_events(pdMS_TO_TICKS(10), &flags);
+            release_ticks = i + 1;
+            held = usbif_host_lib_num_devices();
+            if (held == 0) {
+                break;
+            }
+        }
+        // One more pass with no wait, so no event the release raised is left
+        // pending for usb_host_uninstall()'s own checks to trip over.
+        uint32_t flags = 0;
+        usb_host_lib_handle_events(0, &flags);
+        printf("usbif_host: %d device(s) held after %d tick(s) (%d ms) with the port off\n",
+            held, release_ticks, release_ticks * 10);
+        if (power_err != ESP_OK || held != 0) {
+            usbif_host_task_wedged = true;
+            printf("usbif_host: a device could not be released -- not "
+                   "uninstalling; marked wedged, and host_start() will ask "
+                   "for a reset\n");
+            usbif_host_task_handle = NULL;
+            printf("usbif_host: task exiting, handle cleared, core %d\n", esp_cpu_get_core_id());
+            vTaskDelete(NULL);
+            return;
+        }
+    }
+    #endif
     esp_err_t uninstall_err = usb_host_uninstall();
     printf("usbif_host: uninstall -> 0x%x\n", (unsigned)uninstall_err);
     // A failed uninstall leaves the library installed, so the next
@@ -750,7 +822,7 @@ int usbif_host_start_c(void) {
         // reboot clears the wedge (verified: hard-reset restores clean
         // host_stats()).
         printf("usbif_host: refusing host_start() -- a previous host_stop() "
-               "never completed; the host task is wedged. Reboot required.\n");
+               "could not finish; the host is wedged. Reset the board.\n");
         return -1;
     }
     if (usbif_host_task_handle != NULL) {
