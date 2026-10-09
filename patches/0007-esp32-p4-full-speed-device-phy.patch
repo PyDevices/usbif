@@ -1,0 +1,44 @@
+From: PyDevices usbif
+Date: Fri, 9 Oct 2026 00:00:00 +0000
+Subject: [PATCH] esp32: give a full-speed ESP32-P4 device the full-speed PHY
+
+Purpose: the ESP32-P4 has two USB controllers. MicroPython runs its TinyUSB
+device on the high-speed one unless a board sets MICROPY_HW_USB_HS (0), which
+moves the device to the full-speed controller (GPIO26/27) and leaves the
+high-speed controller free for usbif's host. usb_phy_init() asks for the
+internal PHY but names no speed, and IDF 5.5's usb_new_phy() then hands any
+P4 device whose speed is undefined the high-speed (UTMI) PHY instead
+(components/usb/usb_phy.c, the backward-compatibility block). The device
+would hold the PHY the host needs, and the host's install would fail with
+"selected PHY is in use".
+
+Naming USB_PHY_SPEED_FULL when MICROPY_HW_USB_HS is 0 keeps the device on
+the internal PHY. A build with the default MICROPY_HW_USB_HS (1), and every
+chip but the P4, compiles exactly as before.
+
+Provenance: written for the Waveshare ESP32-P4-WIFI6-DEV-KIT's device port on
+GPIO26/27, 2026-10-09.
+Upstream-version range: authored against v1.29.0 (ESP-IDF 5.5.4).
+Order: independent of 0001-0004; touches the same file as 0004, in another
+function.
+Test: on a P4 built with MICROPY_HW_USB_HS (0), the full-speed controller
+(0x50040000) is clocked and in device mode after boot, the high-speed one is
+not, and usbif's host_start() installs on the high-speed controller with the
+device still attached.
+
+diff --git a/ports/esp32/usb.c b/ports/esp32/usb.c
+index bca2305f1..654e7275f 100644
+--- a/ports/esp32/usb.c
++++ b/ports/esp32/usb.c
+@@ -46,6 +46,11 @@ void usb_phy_init(void) {
+         .controller = USB_PHY_CTRL_OTG,
+         .otg_mode = USB_OTG_MODE_DEVICE,
+         .target = USB_PHY_TARGET_INT,
++        #if CONFIG_IDF_TARGET_ESP32P4 && !MICROPY_HW_USB_HS
++        // The device runs on the full-speed controller. Without a speed, IDF
++        // hands a P4 device the high-speed (UTMI) PHY instead of this one.
++        .otg_speed = USB_PHY_SPEED_FULL,
++        #endif
+     };
+ 
+     // Init ESP USB Phy
