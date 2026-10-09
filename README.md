@@ -38,6 +38,14 @@ plays audio out of the board's codec, and is **opt-in**: at boot the board is
 a plain CDC device, and the audio function appears only when Python asks for
 it. A host cannot be wedged by a board nobody is pumping.
 
+MicroPython's own runtime USB device works beside a costume. micropython-lib's
+`usb-device` packages (`usb-device-mouse`, `-keyboard`, `-midi`, your own
+interfaces) add their interfaces after the costume's, so
+`usb.device.get().init(mouse, builtin_driver=True)` on a board wearing the CDC
+costume gives a console and a mouse on one cable.
+[tests/hardware/usbdevice_runtime_check.py](tests/hardware/usbdevice_runtime_check.py)
+checks it on a board.
+
 The board's USB identity is a Python decision, not a build option: every
 function is compiled in, and the application chooses which the host sees.
 
