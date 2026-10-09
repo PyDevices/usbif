@@ -165,9 +165,10 @@ On the bench that means HID pairs with either MSC or MIDI, while MSC and
 MIDI together do not fit. Note the class filter does *not* buy room: it
 declines interfaces, not devices, and every enumerated device keeps its
 control pipe either way -- so a hub costs two channels before carrying
-anything. Host mode is proven at full speed only: the ESP32-P4's
-high-speed host mode has an open defect
-([#3](https://github.com/PyDevices/usbif/issues/3)). MSC now mounts as a filesystem, read-write
+anything. Host mode is proven at full speed on the ESP32-S3, and at high
+speed on the ESP32-P4 with a webcam on a port that supplies 5 V; behind a hub
+the P4 sees only high-speed devices
+([#15](https://github.com/PyDevices/usbif/issues/15)). MSC now mounts as a filesystem, read-write
 (`examples/usb_drive_mount.py` lists a hosted stick; `usb_drive_log.py`
 appends sensor lines to one and reads them back after a remount), with
 Bulk-Only Reset Recovery and REQUEST SENSE behind it, both exercised by

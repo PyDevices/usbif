@@ -23,7 +23,8 @@ row. Anything smoother is a real resampler, which is a different example.
 
 **Pairing.** A PyDevices board presenting as a webcam (``usbif_webcam.py`` on
 a P4) is a valid camera for this script on an S3, the same way a Logitech is.
-P4 high-speed host is blocked (usbif#3), so the host role here is an S3.
+A P4 can be the host too, on a port that supplies 5 V: the
+ESP32-P4-WIFI6-DEV-KIT's direct Type-A socket streams a webcam this way.
 """
 
 import time
@@ -336,4 +337,4 @@ if picked is not None:
 
     # 10 ms. Frames arrive every 200 ms at 5 fps, so nearly every tick returns
     # immediately.
-    app.every(_tick, period=10, async_=app.timer_async)
+    app.every(_tick, period=10)

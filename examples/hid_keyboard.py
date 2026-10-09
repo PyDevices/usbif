@@ -14,7 +14,7 @@ the host last set (caps / num / scroll). A control surface that wants to show
 them reads the same call.
 
 **Pairing.** An S3 hosting HID (``hid_host.py``) can take this board as its
-keyboard. A PC works the same way. P4 cannot be the host (usbif#3).
+keyboard. A PC works the same way.
 """
 
 import time
