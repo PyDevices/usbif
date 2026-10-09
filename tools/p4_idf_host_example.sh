@@ -4,7 +4,7 @@
 # discriminator usbif#3 names: when usbif's host on the P4 sees no device,
 # this says whether IDF's host stack does either, with usbif out of the picture.
 #
-#   spikes/p4_idf_host_example.sh [--fs] [OUT.bin]
+#   tools/p4_idf_host_example.sh [--fs] [OUT.bin]
 #
 # --fs puts the host on the P4's full-speed controller (peripheral_map BIT1)
 #      instead of the high-speed one (BIT0: what usbif installs on, and the
