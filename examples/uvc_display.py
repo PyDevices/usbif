@@ -50,9 +50,12 @@ IN_LIMIT = 600
 # 100 ns units, which is how UVC counts frame intervals throughout.
 INTERVALS = (2000000, 1333333, 1000000, 666666, 333333)   # 5, 7.5, 10, 15, 30 fps
 
+# False tries the uncompressed (YUY2) modes even when jpegio is present.
+PREFER_MJPEG = True
+
 try:
     import jpegio
-    _HAVE_JPEGIO = True
+    _HAVE_JPEGIO = PREFER_MJPEG
 except ImportError:
     jpegio = None
     _HAVE_JPEGIO = False
@@ -211,7 +214,7 @@ else:
     if _HAVE_JPEGIO:
         print("jpegio present -- preferring MJPEG")
     else:
-        print("jpegio absent -- uncompressed YUY2 only")
+        print("uncompressed YUY2 only (no jpegio, or PREFER_MJPEG is False)")
     blob = host.desc(dev_id)
     formats = uvc.formats(blob)
     alts = uvc.alt_settings(blob)
@@ -254,7 +257,13 @@ if picked is not None:
                   % (_shown, _shown * 1000 / dt, host.uvc_stats()))
 
     if fmt.encoding == "mjpeg":
-        decoder = jpegio.JpegDecoder()
+        # The P4's JPEG engine decodes a whole frame several times faster than
+        # TJpgDec; other chips refuse hardware=True, and an older jpegio
+        # doesn't know the keyword.
+        try:
+            decoder = jpegio.JpegDecoder(hardware=True)
+        except (OSError, TypeError):
+            decoder = jpegio.JpegDecoder()
         # Native-order RGB565, tight. Sized for the negotiated frame; a camera
         # that sends a larger JPEG than it advertised is refused by decode.
         rgb = bytearray(frame.width * frame.height * 2)
