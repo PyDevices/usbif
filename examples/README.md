@@ -19,9 +19,11 @@ pairing is the same scripts on two boards, not a special `pair_*` file.
 
 ## Board-to-board pairings
 
-Roles follow the hardware each board has, not their size. **P4 is always the
-device** in these pairings: its high-speed host detects no device
-([usbif#3](https://github.com/PyDevices/usbif/issues/3)).
+Roles follow the hardware each board has, not their size. The P4 is the
+device in these pairings. It can host too, but only on a port that supplies
+5 V, such as the ESP32-P4-WIFI6-DEV-KIT's direct Type-A socket, where
+`uvc_display.py` streams a webcam. The Touch-LCD-4B's USB-C port only takes
+power in, so it can't host without 5 V from outside.
 
 | Device board | Script | Host board | Script | What is lent |
 |---|---|---|---|---|
@@ -55,7 +57,7 @@ wedged board.
 | Hole | Issue | Consequence for examples |
 |---|---|---|
 | Device UAC is speaker-only (no mic endpoint) | [usbif#7](https://github.com/PyDevices/usbif/issues/7) | `usb_mic.py` hosts a commercial mic; no device-side capture script |
-| P4 high-speed host detects nothing | [usbif#3](https://github.com/PyDevices/usbif/issues/3) | Every pairing puts the P4 in device role |
+| P4 behind a hub sees only high-speed devices | [usbif#15](https://github.com/PyDevices/usbif/issues/15) | A keyboard or MIDI controller goes straight into the P4's host port, not through a hub |
 | Host FIFO split is per session | [usbif#2](https://github.com/PyDevices/usbif/issues/2) | `host(classes=...)` decides it: `uvc` leans IN (600 B), `uac` without `uvc` gives periodic OUT 200 B and IN 528 B; a camera and a 2.0 speaker cannot share one `start()` |
 
 ## Conventions

@@ -9,7 +9,8 @@ Capabilities are discovered, never assumed -- an empty set is a valid answer.
 
 Plug and unplug devices while it runs; each attach and detach is printed.
 On an S3 host that means a powered hub or OTG adapter (no VBUS switching on
-the Waveshare touch boards). P4 high-speed host is blocked (usbif#3).
+the Waveshare touch boards). A P4 hosts on a port that supplies 5 V, and
+behind a hub it sees only high-speed devices (usbif#15).
 """
 
 import sys

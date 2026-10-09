@@ -8,8 +8,9 @@ releases by diffing successive reports.
     mpftp run -d COM49 examples/hid_host.py
 
 **Pairing.** A commercial keyboard, or a PyDevices board running
-``hid_keyboard.py``. Needs an S3 (or any board whose host mode works); P4
-host is blocked (usbif#3).
+``hid_keyboard.py``. Needs an S3, or a P4 with the keyboard plugged straight
+into a host port that supplies 5 V: behind a hub the P4 sees only high-speed
+devices (usbif#15).
 
 **Rollover.** When more keys are held than the report can carry, the decoder
 ignores the ErrorRollOver report rather than emitting garbage -- see the
