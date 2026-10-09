@@ -185,7 +185,10 @@ of opening a session and it can still wedge), root-caused to a single
 esp-idf call (`usb_host_endpoint_halt()`) blocking indefinitely -- a layer
 below anything in this module's own source, not yet closed. A wedged host
 now raises `OSError` instead of silently pretending to keep working
-either way. `host_start()`'s class filter **is** now honoured -- verified both
+either way. Teardown's waits are bounded in milliseconds rather than ticks,
+so a board built with a 1000 Hz FreeRTOS tick stops as cleanly as one at
+100 Hz ([#29](https://github.com/PyDevices/usbif/issues/29)).
+`host_start()`'s class filter **is** now honoured -- verified both
 in the intersection arithmetic and against a live device (excluded from a
 class tuple, it is invisible to `host_devices()`; included, it attaches) --
 and `capabilities()` reports the true built set (`{'cdc', 'hid', 'msc'}` on

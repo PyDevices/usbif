@@ -29,6 +29,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "usb/usb_host.h"
+#include "usbif_ticks.h"
 
 extern usb_host_client_handle_t usbif_host_client_get(void);
 extern void usbif_host_lock(void);
@@ -202,7 +203,9 @@ static void usbif_hid_release(void) {
     usb_host_transfer_free(usbif_hid.xfer_in);
     usbif_hid.xfer_in = NULL;
     esp_err_t err = ESP_FAIL;
-    for (int i = 0; i < 25; i++) {
+    // About 250 ms at any tick rate (usbif_ticks.h).
+    const TickType_t release_limit = USBIF_MS_TICKS(250);
+    for (TickType_t i = 0; i < release_limit; i++) {
         err = usb_host_interface_release(usbif_host_client_get(),
             usbif_hid.dev, usbif_hid.itf);
         if (err == ESP_OK) {

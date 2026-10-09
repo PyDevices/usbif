@@ -41,6 +41,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "usb/usb_host.h"
+#include "usbif_ticks.h"
 
 #include "shared/usbif_midi_packet.h"
 
@@ -234,7 +235,8 @@ static int usbif_host_midi_write_locked(const uint8_t *data, size_t len) {
     // host task, which this lock excludes. Holding it here cannot be slow,
     // only fatal.
     int held = usbif_host_lock_suspend();
-    for (int i = 0; i < 20 && usbif_midih.out_busy; i++) {
+    const TickType_t busy_limit = USBIF_MS_TICKS(200);
+    for (TickType_t i = 0; i < busy_limit && usbif_midih.out_busy; i++) {
         vTaskDelay(1);
     }
     usbif_host_lock_resume(held);
@@ -317,14 +319,16 @@ static void usbif_midih_release(void) {
     // later as ESP_ERR_INVALID_STATE from a host_stop() far away from here.
     // Waiting for the pump is the actual fix.
     esp_err_t err = ESP_FAIL;
-    for (int i = 0; i < 25; i++) {
+    // About 250 ms at any tick rate (usbif_ticks.h).
+    const TickType_t release_limit = USBIF_MS_TICKS(250);
+    for (TickType_t i = 0; i < release_limit; i++) {
         err = usb_host_interface_release(usbif_host_client_get(),
             usbif_midih.dev, usbif_midih.itf);
         if (err == ESP_OK) {
             break;
         }
         int held = usbif_host_lock_suspend();
-        vTaskDelay(1);      // one 10 ms tick; ~250 ms bound in total
+        vTaskDelay(1);
         usbif_host_lock_resume(held);
     }
     usbif_host_midi_release_failed = (err == ESP_OK) ? 0 : 1;

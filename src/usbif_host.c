@@ -54,6 +54,8 @@
 
 #include "shared/usbif_ringbuf.h"
 #include "usbif_classes.h"
+#include "usbif_ticks.h"
+#include "esp_timer.h"
 
 #if MICROPY_HW_ENABLE_USBDEV
 #include "tusb.h"
@@ -217,6 +219,25 @@ bool usbif_host_is_wedged(void) {
 #ifndef USBIF_HOST_RELEASE_STUCK_DEVICES
 #define USBIF_HOST_RELEASE_STUCK_DEVICES (1)
 #endif
+
+// How long host_stop() waits for the task to finish teardown before it calls
+// the host wedged. Teardown bounds each of its own waits; added up, the worst
+// case is about four seconds (each class driver's close, the 200 ms drain,
+// the 1 s ALL_FREE wait, the 1 s release with the root port off). This used
+// to be 200 ticks, which is 2 s at 100 Hz and 200 ms at 1000 Hz, so on a
+// 1000 Hz board every stop with a device attached was reported as a wedge
+// (usbif#29). Only a teardown stuck inside an IDF call should run out this
+// clock.
+#ifndef USBIF_HOST_STOP_WAIT_MS
+#define USBIF_HOST_STOP_WAIT_MS (6000)
+#endif
+
+// Milliseconds since teardown began, for its log lines: a stop that is slow
+// says where it spent the time.
+static int64_t usbif_host_teardown_t0;
+static int usbif_host_teardown_ms(void) {
+    return (int)((esp_timer_get_time() - usbif_host_teardown_t0) / 1000);
+}
 
 // How many devices the host library still holds, enumerating ones included;
 // -1 if it isn't installed.
@@ -571,6 +592,7 @@ static void usbif_host_task(void *arg) {
     // walk away as a client, free the devices, and drain events until the
     // library confirms everything is gone.
     usbif_host_tearing_down = true;
+    usbif_host_teardown_t0 = esp_timer_get_time();
     printf("usbif_host: teardown starting (new devices now declined)\n");
     for (int i = 0; i < USBIF_HOST_MAX_DEVS; i++) {
         if (usbif_host_devs[i].in_use) {
@@ -639,7 +661,7 @@ static void usbif_host_task(void *arg) {
             usbif_host_uvc_close_for_host_stop();
             printf("usbif_host: device_close\n");
             usb_host_device_close(usbif_host_client, usbif_host_devs[i].hdl);
-            printf("usbif_host: device_close returned\n");
+            printf("usbif_host: device_close returned at %d ms\n", usbif_host_teardown_ms());
             usbif_host_devs[i].in_use = false;
         }
     }
@@ -674,7 +696,7 @@ static void usbif_host_task(void *arg) {
         // mutex through it does not.
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    printf("usbif_host: pre-deregister drain done\n");
+    printf("usbif_host: pre-deregister drain done at %d ms\n", usbif_host_teardown_ms());
     esp_err_t dereg_err = usb_host_client_deregister(usbif_host_client);
     printf("usbif_host: deregister -> 0x%x\n", (unsigned)dereg_err);
     usbif_host_client = NULL;
@@ -697,8 +719,8 @@ static void usbif_host_task(void *arg) {
             break;
         }
     }
-    printf("usbif_host: ALL_FREE %s after %d tick(s) (%d ms)\n",
-        all_free_seen ? "seen" : "NOT seen -- timed out", free_wait_ticks, free_wait_ticks * 10);
+    printf("usbif_host: ALL_FREE %s after %d poll(s), at %d ms\n",
+        all_free_seen ? "seen" : "NOT seen -- timed out", free_wait_ticks, usbif_host_teardown_ms());
 
     // A device that stopped answering in the middle of enumeration (usbif#65:
     // a webcam left streaming across a board reset, on a socket whose 5 V
@@ -736,8 +758,8 @@ static void usbif_host_task(void *arg) {
         // pending for usb_host_uninstall()'s own checks to trip over.
         uint32_t flags = 0;
         usb_host_lib_handle_events(0, &flags);
-        printf("usbif_host: %d device(s) held after %d tick(s) (%d ms) with the port off\n",
-            held, release_ticks, release_ticks * 10);
+        printf("usbif_host: %d device(s) held after %d poll(s) with the port off, at %d ms\n",
+            held, release_ticks, usbif_host_teardown_ms());
         if (power_err != ESP_OK || held != 0) {
             usbif_host_task_wedged = true;
             printf("usbif_host: a device could not be released -- not "
@@ -751,7 +773,7 @@ static void usbif_host_task(void *arg) {
     }
     #endif
     esp_err_t uninstall_err = usb_host_uninstall();
-    printf("usbif_host: uninstall -> 0x%x\n", (unsigned)uninstall_err);
+    printf("usbif_host: uninstall -> 0x%x at %d ms\n", (unsigned)uninstall_err, usbif_host_teardown_ms());
     // A failed uninstall leaves the library installed, so the next
     // usb_host_install() returns ESP_ERR_INVALID_STATE and host_start() fails
     // for a reason that looks nothing like its cause. Printing this and
@@ -868,11 +890,12 @@ int usbif_host_start_c(void) {
     }
     // Wait for the task's install verdict (it is quick; the timeout is a
     // failsafe, not an expectation). vTaskDelay(1), not pdMS_TO_TICKS(5):
-    // this port ticks at 100 Hz, so five milliseconds rounds to ZERO ticks
-    // and a "delay" loop of yields burns out in microseconds -- the same
-    // trap usbif_i2s.c documents, stepped in again here. One tick is 10 ms;
-    // 200 of them bound the wait at two seconds.
-    for (int i = 0; i < 200 && usbif_host_install_result == USBIF_HOST_INSTALL_PENDING; i++) {
+    // at 100 Hz five milliseconds rounds to ZERO ticks and a "delay" loop of
+    // yields burns out in microseconds -- the same trap usbif_i2s.c
+    // documents, stepped in again here. The bound is two seconds at any tick
+    // rate (usbif_ticks.h).
+    const TickType_t install_limit = USBIF_MS_TICKS(2000);
+    for (TickType_t i = 0; i < install_limit && usbif_host_install_result == USBIF_HOST_INSTALL_PENDING; i++) {
         vTaskDelay(1);
     }
     if (usbif_host_install_result == ESP_OK) {
@@ -894,9 +917,11 @@ void usbif_host_stop_c(void) {
         return;
     }
     usbif_host_task_running = false;
-    int wait_ticks = 0;
-    for (int i = 0; i < 200 && usbif_host_task_handle != NULL; i++) {
-        vTaskDelay(1);   // one 10 ms tick; pdMS_TO_TICKS(5) is ZERO ticks here
+    // Bounded in milliseconds, not ticks: see USBIF_HOST_STOP_WAIT_MS.
+    const TickType_t stop_limit = USBIF_MS_TICKS(USBIF_HOST_STOP_WAIT_MS);
+    TickType_t wait_ticks = 0;
+    for (TickType_t i = 0; i < stop_limit && usbif_host_task_handle != NULL; i++) {
+        vTaskDelay(1);
         wait_ticks = i + 1;
     }
     // The task uninstalled the library itself before exiting: the HCD
@@ -913,9 +938,9 @@ void usbif_host_stop_c(void) {
     if (!task_exited) {
         usbif_host_task_wedged = true;
     }
-    printf("usbif_host_stop: task %s after %d tick(s) (%d ms)\n",
+    printf("usbif_host_stop: task %s after %d ms\n",
         task_exited ? "exited cleanly" : "DID NOT EXIT -- timed out (marked wedged)",
-        wait_ticks, wait_ticks * 10);
+        USBIF_TICKS_MS(wait_ticks));
 
     #if USBIF_HOST_TAKES_DEVICE
     // Hand the controller back: device-mode PHY, then the TinyUSB device

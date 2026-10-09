@@ -34,6 +34,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "usb/usb_host.h"
+#include "usbif_ticks.h"
 
 extern usb_host_client_handle_t usbif_host_client_get(void);
 extern void usbif_host_lock(void);
@@ -44,7 +45,7 @@ extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
 
 #define USBIF_MSC_MAX_MPS   (64)
 #define USBIF_MSC_BLOCK_MAX (512)
-#define USBIF_MSC_TIMEOUT_TICKS (100)   // 1 s of 10 ms ticks per stage
+#define USBIF_MSC_TIMEOUT_MS (1000)   // per stage, at any tick rate (usbif_ticks.h)
 
 typedef struct {
     bool open;
@@ -151,7 +152,8 @@ static void usbif_msc_bot_reset(void) {
     // host task, which this lock excludes. Holding it here cannot be slow,
     // only fatal.
     int held = usbif_host_lock_suspend();
-    for (int i = 0; i < 50 && !usbif_msc.ctrl_done; i++) {
+    const TickType_t ctrl_limit = USBIF_MS_TICKS(500);
+    for (TickType_t i = 0; i < ctrl_limit && !usbif_msc.ctrl_done; i++) {
         vTaskDelay(1);
     }
     usbif_host_lock_resume(held);
@@ -178,7 +180,8 @@ static int usbif_msc_stage(uint8_t ep, const void *out_data, size_t len) {
     // host task, which this lock excludes. Holding it here cannot be slow,
     // only fatal.
     int held = usbif_host_lock_suspend();
-    for (int i = 0; i < USBIF_MSC_TIMEOUT_TICKS && !usbif_msc.done; i++) {
+    const TickType_t limit = USBIF_MS_TICKS(USBIF_MSC_TIMEOUT_MS);
+    for (TickType_t i = 0; i < limit && !usbif_msc.done; i++) {
         vTaskDelay(1);
     }
     usbif_host_lock_resume(held);

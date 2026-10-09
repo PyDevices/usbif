@@ -27,6 +27,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "usb/usb_host.h"
+#include "usbif_ticks.h"
 
 // From usbif_host.c: the client handle and a device lookup by the dev_id
 // the event transport reported to Python.
@@ -220,7 +221,8 @@ static int usbif_cdc_write_locked(const uint8_t *data, size_t len) {
     // host task, which this lock excludes. Holding it here cannot be slow,
     // only fatal.
     int held = usbif_host_lock_suspend();
-    for (int i = 0; i < 20 && usbif_cdc.out_busy; i++) {
+    const TickType_t busy_limit = USBIF_MS_TICKS(200);
+    for (TickType_t i = 0; i < busy_limit && usbif_cdc.out_busy; i++) {
         vTaskDelay(1);
     }
     usbif_host_lock_resume(held);
@@ -289,7 +291,9 @@ static void usbif_cdc_release(void) {
     usbif_cdc.xfer_out = NULL;
     usbif_cdc.xfer_ctrl = NULL;
     esp_err_t err = ESP_FAIL;
-    for (int i = 0; i < 25; i++) {
+    // About 250 ms at any tick rate (usbif_ticks.h).
+    const TickType_t release_limit = USBIF_MS_TICKS(250);
+    for (TickType_t i = 0; i < release_limit; i++) {
         err = usb_host_interface_release(usbif_host_client_get(),
             usbif_cdc.dev, usbif_cdc.data_itf);
         if (err == ESP_OK) {
