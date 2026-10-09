@@ -13,8 +13,13 @@
 // device-mode PHY through the patch-0004 helpers in ports/esp32/usb.c, and
 // only then installs the host library, which creates its own host-mode PHY.
 // Stopping reverses the sequence, so a board is a plain CDC device again
-// after host_stop() + replug. One controller, one owner at a time; the
-// concurrent host+device story waits for hardware with both ports wired.
+// after host_stop() + replug. One controller, one owner at a time.
+//
+// The ESP32-P4 has two controllers, and a board can keep both busy: the host
+// on the high-speed one, the device on the full-speed one. A board built
+// with MICROPY_HW_USB_HS (0) puts TinyUSB's device there, and then the
+// handoff above is skipped in both directions, so the device stays attached
+// while the host starts and stops (USBIF_HOST_TAKES_DEVICE below).
 //
 // Class drivers (CDC, HID, MSC) now exist alongside this file, each opened
 // on demand by Python once it sees an attach whose class bitmask matches.
@@ -56,6 +61,20 @@
 // around host duty, and restore it afterwards.
 extern void usb_phy_otg_release(void);
 extern void usb_phy_otg_device_mode(void);
+
+// Whether starting the host takes the controller the device stack runs on.
+// The host runs on the P4's high-speed controller (peripheral_map BIT0 in
+// usbif_host_task), which TinyUSB numbers port 1, and on the one controller
+// every other chip has. A P4 board built with MICROPY_HW_USB_HS (0) runs its
+// device on the full-speed controller, TinyUSB's port 0, which the host
+// never touches.
+#if defined(CONFIG_IDF_TARGET_ESP32P4) && TUD_OPT_RHPORT == 0
+#define USBIF_HOST_TAKES_DEVICE (0)
+#else
+#define USBIF_HOST_TAKES_DEVICE (1)
+#endif
+#else
+#define USBIF_HOST_TAKES_DEVICE (0)
 #endif
 
 // mod_usbif.c owns the event ring; this is its producer hook. Single
@@ -738,7 +757,7 @@ int usbif_host_start_c(void) {
         return 0;
     }
 
-    #if MICROPY_HW_ENABLE_USBDEV
+    #if USBIF_HOST_TAKES_DEVICE
     // Quiesce the device stack before touching the controller: disconnect so
     // an attached host sees a clean detach, deinit so the DWC interrupt is
     // freed, then release the device-mode PHY. The host library creates its
@@ -790,7 +809,7 @@ int usbif_host_start_c(void) {
     usbif_host_task_running = false;
 
 restore_device:
-    #if MICROPY_HW_ENABLE_USBDEV
+    #if USBIF_HOST_TAKES_DEVICE
     usb_phy_otg_device_mode();
     tusb_init();
     #endif
@@ -826,7 +845,7 @@ void usbif_host_stop_c(void) {
         task_exited ? "exited cleanly" : "DID NOT EXIT -- timed out (marked wedged)",
         wait_ticks, wait_ticks * 10);
 
-    #if MICROPY_HW_ENABLE_USBDEV
+    #if USBIF_HOST_TAKES_DEVICE
     // Hand the controller back: device-mode PHY, then the TinyUSB device
     // stack. The board is a CDC device again on its next connection.
     printf("usbif_host_stop: calling usb_phy_otg_device_mode()\n");

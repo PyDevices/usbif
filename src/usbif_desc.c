@@ -50,7 +50,9 @@
 // or 6 opens without complaint, queues one transfer and never completes
 // it. That was usbif#23: exactly one HID report per costume on the S3,
 // with HID sitting at the compile-time endpoint 6. The P4's high-speed
-// controller has endpoints 0..15 and FIFOs 0..7. Usermod sources build with
+// controller, TinyUSB's port 1, has endpoints 0..15 and FIFOs 0..7; its
+// full-speed one, port 0, where a board built with MICROPY_HW_USB_HS (0) runs
+// the device, has the S3's numbers. Usermod sources build with
 // MicroPython's define set, so the IDF target comes from sdkconfig.h when
 // there is one; anything unknown gets the small controller's numbers.
 #if defined(__has_include)
@@ -58,7 +60,7 @@
 #include "sdkconfig.h"
 #endif
 #endif
-#if defined(CONFIG_IDF_TARGET_ESP32P4)
+#if defined(CONFIG_IDF_TARGET_ESP32P4) && TUD_OPT_RHPORT == 1
 #define USBIF_EP_NUM_MAX (15)   // highest endpoint number, either direction
 #define USBIF_EP_IN_MAX  (7)    // highest IN endpoint number that has a FIFO
 #else
