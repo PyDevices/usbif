@@ -62,6 +62,7 @@ extern int usbif_desc_check(void);
 #define USBIF_HAVE_HOST (1)
 extern int usbif_host_start_c(void);
 extern void usbif_host_stop_c(void);
+extern bool usbif_host_is_wedged(void);
 extern bool usbif_host_is_running(void);
 extern int usbif_host_snapshot(usbif_event_t *out, int max);
 extern uint32_t usbif_host_attaches, usbif_host_detaches, usbif_host_errors;
@@ -243,6 +244,12 @@ static mp_obj_t usbif_host_start(mp_obj_t classes_in) {
     usbif_host_set_class_filter(wanted);
     int err = usbif_host_start_c();
     if (err != 0) {
+        if (usbif_host_is_wedged()) {
+            // A plain errno here read as 0x103 or EIO, which says nothing
+            // about the one thing that clears it.
+            mp_raise_msg(&mp_type_OSError,
+                MP_ERROR_TEXT("USB host wedged: a device could not be released; reset the board"));
+        }
         mp_raise_OSError(err > 0 ? err : MP_EIO);
     }
     #endif
