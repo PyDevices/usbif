@@ -222,9 +222,14 @@ class MidiPort:
         pass
 
     def _check(self, want):
+        # Two comparisons rather than `in (want, INOUT)`: the tuple is built
+        # on every call, and read() is polled every few milliseconds by apps
+        # that also move audio, where the garbage it leaves forces a
+        # collection (tens of milliseconds on a large heap) every second or so.
         if not self.is_open:
             raise OSError("MIDI port is closed")
-        if self.direction not in (want, INOUT):
+        direction = self.direction
+        if direction != want and direction != INOUT:
             raise OSError(
                 "MIDI port {!r} is {}-only".format(self.info.name, self.direction)
             )
