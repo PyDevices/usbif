@@ -15,6 +15,11 @@ board. A laptop works identically -- standard classes are the protocol.
 watching the buffer and for latency tools that need ``uac_read``. Do not use
 it as the sound card; use this.
 
+**REPL.** ``main()`` starts the card and returns: the pump runs in C, so the
+REPL stays usable while it plays. ``stats()`` prints the pump's counters,
+``watch()`` prints them every second until Ctrl-C, and ``stop()`` stops the
+card.
+
 **Console.** Costume is CDC+UAC so the REPL stays on the same cable. UART is
 still the safer place for the REPL when iterating (a costume change that drops
 CDC cuts a native-USB session mid-run).
@@ -148,7 +153,8 @@ def _spectrum():
         from analyzer import Spectrum, levels_for_soundcard
 
         meter = Spectrum(display_drv, levels_for_soundcard())
-    except (ImportError, ValueError) as error:
+    except (ImportError, ValueError, OSError) as error:
+        # OSError: another meter already holds the sound card.
         print("no spectrum:", error)
         return None
     # A panel that presents just the rows the meter changed has the app's
@@ -156,18 +162,41 @@ def _spectrum():
     app = appdev.App(board_config, refresh_period=0 if meter.present_rows else None)
     meter.start(app)
     print("spectrum: on the display, from", folder)
+    global _meter
+    _meter = meter
     return app
 
 
+_dev = None
+_powered = False
+_meter = None
+
+
 def main():
-    _spectrum()  # before the card, as the meter attaches to its pump
+    """Start the sound card and return, so the REPL stays usable.
+
+    The pump moves the audio in C, so nothing in Python has to keep looping
+    for it: ``stats()`` reports the pump once, ``watch()`` reports it every
+    second until Ctrl-C, and ``stop()`` stops the card.
+    """
+    global _dev, _powered
+    if _dev is not None:
+        print("the sound card is already running; stop() first")
+        return
     dev = usbif.auto.device()
+    if dev.uac_pump_stats()[0]:
+        # A soft reset leaves the C pump running (its buffers aren't on the
+        # Python heap), with nothing in Python left to stop it, and holding
+        # I2S: uac_pump_start() would fail. Stop it, then start afresh.
+        dev.uac_pump_stop()
+        print("stopped the pump left running by a soft reset")
+    _spectrum()  # before the card, as the meter attaches to its pump
     wire = _wire()
     bclk, ws, dout, mclk = wire.sck, wire.ws, wire.sd, wire.mck
     fmt = bp.AUDIO_OUT.default
     rate, bits, channels = _wire_rate(bp.AUDIO_OUT), fmt.bits, fmt.channels
 
-    powered = _bring_up_codec()
+    _powered = _bring_up_codec()
 
     # Costume first so the host sees the sound card before we start the pump.
     # CDC stays so the REPL survives on the same connector.
@@ -182,28 +211,55 @@ def main():
         # anything above 32 kHz fail outright. See usbif#12.
         kwargs["mclk_multiple"] = wire.mck_fs
     dev.uac_pump_start(bclk, ws, dout, **kwargs)
+    _dev = dev
     print("C pump started: I2S bclk=%d ws=%d dout=%d rate=%d ch=%d codec=%s"
-          % (bclk, ws, dout, rate, channels, "up" if powered else "UNTOUCHED"))
+          % (bclk, ws, dout, rate, channels, "up" if _powered else "UNTOUCHED"))
     print("play audio to this board from a PC, or from usb_speaker.py on an S3")
+    print("at the REPL: soundcard.stats(), soundcard.watch(), soundcard.stop()")
 
+
+def stats():
+    """Print the pump's counters once."""
+    if _dev is None:
+        print("the sound card isn't running: soundcard.main() starts it")
+        return
+    running, moved, idle, timeouts, shed = _dev.uac_pump_stats()
+    host_rate, wire_rate, _ = _dev.uac_pump_rate()
+    print("pump running=%s host=%d wire=%d bytes=%d idle=%d "
+          "timeouts=%d shed=%d"
+          % (running, host_rate, wire_rate, moved, idle, timeouts, shed))
+
+
+def watch():
+    """Print the pump's counters every second until Ctrl-C; the card plays on."""
     try:
         while True:
+            stats()
             time.sleep_ms(1000)
-            running, moved, idle, timeouts, shed = dev.uac_pump_stats()
-            host_rate, wire_rate, _ = dev.uac_pump_rate()
-            print("pump running=%s host=%d wire=%d bytes=%d idle=%d "
-                  "timeouts=%d shed=%d"
-                  % (running, host_rate, wire_rate, moved, idle, timeouts,
-                     shed))
     except KeyboardInterrupt:
-        print("stopping")
-    finally:
-        dev.uac_pump_stop()
-        if powered:
-            # Amp off after the pump releases I2S, not before: dropping the
-            # analog path while DMA is still clocking pops the speaker.
-            bp.audio_power(False)
+        pass
 
+
+def stop():
+    """Stop the sound card: the pump, then the amp."""
+    global _dev, _powered, _meter
+    if _meter is not None:
+        # Stop drawing, and let go of the sound card, so a later main() can
+        # attach a meter of its own.
+        _meter.stop()
+        close = getattr(_meter.source, "close", None)
+        if close is not None:
+            close()
+        _meter = None
+    if _dev is None:
+        return
+    _dev.uac_pump_stop()
+    _dev = None
+    if _powered:
+        # Amp off after the pump releases I2S, not before: dropping the
+        # analog path while DMA is still clocking pops the speaker.
+        bp.audio_power(False)
+        _powered = False
 
 if __name__ == "__main__":
     main()
