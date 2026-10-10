@@ -284,12 +284,6 @@ uint8_t usbif_cdc_release_failed;
 // a different task from the one usually calling close(), so an immediate
 // release loses a race it never needed to enter.
 static void usbif_cdc_release(void) {
-    usb_host_transfer_free(usbif_cdc.xfer_in);
-    usb_host_transfer_free(usbif_cdc.xfer_out);
-    usb_host_transfer_free(usbif_cdc.xfer_ctrl);
-    usbif_cdc.xfer_in = NULL;
-    usbif_cdc.xfer_out = NULL;
-    usbif_cdc.xfer_ctrl = NULL;
     esp_err_t err = ESP_FAIL;
     // About 250 ms at any tick rate (usbif_ticks.h).
     const TickType_t release_limit = USBIF_MS_TICKS(250);
@@ -304,6 +298,22 @@ static void usbif_cdc_release(void) {
         usbif_host_lock_resume(held);
     }
     usbif_cdc_release_failed = (err == ESP_OK) ? 0 : 1;
+
+    // Free the transfers only now, as the HID and MIDI hosts do (usbif#74,
+    // usbif#75). The bulk IN transfer is always re-armed, so one is in flight
+    // at every close; after halt and flush it stays queued in the library
+    // until the client pump retires it, writing to it as it does. Freed
+    // first, the pump wrote into freed heap. If the release never succeeds,
+    // the transfers may still be queued, so they are leaked rather than freed
+    // under the library.
+    if (err == ESP_OK) {
+        usb_host_transfer_free(usbif_cdc.xfer_in);
+        usb_host_transfer_free(usbif_cdc.xfer_out);
+        usb_host_transfer_free(usbif_cdc.xfer_ctrl);
+    }
+    usbif_cdc.xfer_in = NULL;
+    usbif_cdc.xfer_out = NULL;
+    usbif_cdc.xfer_ctrl = NULL;
 }
 
 static void usbif_cdc_close_locked(void) {
