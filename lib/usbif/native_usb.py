@@ -346,15 +346,20 @@ class NativeDevice(Device):
         rate the pump's I2S wire is clocked at, and how often it followed."""
         return _require().uac_pump_rate(*args)
 
-    def uac_available(self, *args):
-        return _require().uac_available(*args)
+    # uac_available() and uac_read() take fixed arguments, unlike the
+    # wrappers around them: they are what a Python pump polls every
+    # millisecond, and `*args` builds a tuple per call. That garbage forces a
+    # collection every so often, which on a large heap stalls the pump for
+    # longer than the 4.7 ms the full-speed FIFO holds.
+    def uac_available(self):
+        return _require().uac_available()
 
     def uac_volume(self, *args):
         """The host's playback volume and mute, as the host set them."""
         return _require().uac_volume(*args)
 
-    def uac_read(self, *args):
-        return _require().uac_read(*args)
+    def uac_read(self, buf=None):
+        return _require().uac_read(buf)
 
     def uac_stats(self, *args):
         return _require().uac_stats(*args)
