@@ -12,7 +12,7 @@ pairing is the same scripts on two boards, not a special `pair_*` file.
 | **UVC** | [`usbif_webcam.py`](usbif_webcam.py) | [`uvc_display.py`](uvc_display.py) (MJPEG via `jpegio` when present) |
 | **MIDI** | [`midi_harmonizer.py`](midi_harmonizer.py), [`midi_harmonizer_ui.py`](midi_harmonizer_ui.py), [`midi_device_in.py`](midi_device_in.py), [`midi_latency.py`](midi_latency.py) | [`midi_host.py`](midi_host.py) |
 | **HID** | [`hid_keyboard.py`](hid_keyboard.py), [`hid_mouse.py`](hid_mouse.py) | [`hid_host.py`](hid_host.py) |
-| **MSC** | [`sd_drive.py`](sd_drive.py), [`ram_drive.py`](ram_drive.py) | [`usb_drive_mount.py`](usb_drive_mount.py), [`usb_drive_log.py`](usb_drive_log.py) |
+| **MSC** | [`sd_drive.py`](sd_drive.py), [`ram_drive.py`](ram_drive.py) | [`usb_drive_mount.py`](usb_drive_mount.py), [`usb_drive_read.py`](usb_drive_read.py), [`usb_drive_log.py`](usb_drive_log.py) |
 | **CDC** | built-in MicroPython console / costume bit | [`usb_serial.py`](usb_serial.py) |
 | **enum** | — | [`host_enum.py`](host_enum.py) (portable API; board or desktop) |
 | **self-test** | [`costume_selftest.py`](costume_selftest.py) | — |
@@ -29,7 +29,7 @@ power in, so it can't host without 5 V from outside.
 |---|---|---|---|---|
 | **P4** | `soundcard.py` | **S3** | `usb_speaker.py` | Sound output -- the headline offload |
 | **P4** | `usbif_webcam.py` | **S3** | `uvc_display.py` | Camera → panel |
-| **P4** | `sd_drive.py` | **S3** | `usb_drive_mount.py` | Shared storage |
+| **P4** | `sd_drive.py` | **S3** | `usb_drive_mount.py`, `usb_drive_read.py` | Shared storage |
 | **P4** / **S3** | `midi_harmonizer.py` | **S3** | `midi_host.py` | MIDI effect / instrument |
 | **S3** | `hid_keyboard.py` | **S3** | `hid_host.py` | Control surface (needs two S3s, or S3-device + PC) |
 
