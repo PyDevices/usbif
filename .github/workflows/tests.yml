@@ -73,6 +73,20 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -Isrc \
              -o /tmp/test_uvc_queue tests/test_uvc_queue.c
           /tmp/test_uvc_queue
+      - name: Build and run the sound card pump block tests (the meter reads what plays)
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -Isrc \
+             -o /tmp/test_pump_block tests/test_pump_block.c
+          /tmp/test_pump_block
+      - name: The pump block tests can fail (metering before the gain must be caught)
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Isrc -DUSBIF_PUMP_PLANT_METER_BEFORE_GAIN \
+             -o /tmp/test_pump_block_planted tests/test_pump_block.c
+          if /tmp/test_pump_block_planted > /tmp/planted.log 2>&1; then
+            cat /tmp/planted.log
+            echo "metering before the gain was NOT caught"; exit 1
+          fi
+          echo "planted fault caught:"; grep FAIL /tmp/planted.log | head -3
 
   patches:
     # The patch queue is only useful if it still applies. This catches the

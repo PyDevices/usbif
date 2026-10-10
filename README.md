@@ -79,7 +79,9 @@ controller drives IN endpoints 1 to 7, so every combination fits there.
 To show what the sound card is playing as a spectrum, attach audiodsp's
 [`audiometer`](https://github.com/PyDevices/audiodsp/tree/main/src/audiometer)
 to it: `audiometer.Meter(32).attach(audiometer.UAC)`, then read `levels()` at
-your frame rate. The pump feeds the meter in C, on its own core. This was
+your frame rate. The pump feeds the meter in C, on its own core, after the
+host's volume and mute, so it shows what plays at any slider position on
+every host. This was
 `uac_pump_meter()` and `uac_pump_levels()` until the meter moved to audiodsp;
 usbif finds it through a weak symbol, so a firmware without audiodsp still
 builds and pumps.
