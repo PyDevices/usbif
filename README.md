@@ -170,7 +170,8 @@ speed on the ESP32-P4 with a webcam on a port that supplies 5 V; behind a hub
 the P4 sees only high-speed devices
 ([#15](https://github.com/PyDevices/usbif/issues/15)). MSC now mounts as a filesystem, read-write
 (`examples/usb_drive_mount.py` lists a hosted stick; `usb_drive_log.py`
-appends sensor lines to one and reads them back after a remount), with
+appends sensor lines to one and reads them back after a remount;
+`usb_drive_read.py` reads a file end to end and checks its SHA-256), with
 Bulk-Only Reset Recovery and REQUEST SENSE behind it, both exercised by
 a deliberate device-side failure rather than assumed; HID delivers raw reports rather than decoded
 events; and `host_stop()` on a device that was genuinely held open is now
