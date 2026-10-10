@@ -23,7 +23,7 @@ jobs:
     name: Host-testable C (ring buffers, C sink, MIDI packet codec)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build and run the SPSC ring buffer tests
         run: |
           cc -std=c11 -Wall -Wextra -Werror -Isrc \
@@ -80,7 +80,7 @@ jobs:
     name: Patch queue applies to the pinned upstream
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check out the MicroPython version the patches are written against
         run: |
           # Must match the version patches/ is written against. Moved to
@@ -118,14 +118,14 @@ jobs:
       matrix:
         python-version: ['3.11', '3.14']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: usbif
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: PyDevices/pydevices
           path: pydevices
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Run the suite
@@ -140,10 +140,10 @@ jobs:
     name: MicroPython unix build with usbif
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: usbif
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: PyDevices/pydevices
           path: pydevices
