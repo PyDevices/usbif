@@ -10,6 +10,11 @@ drives a commercial USB mic (or any UAC capture device) through
 Prints peak and RMS over the captured buffer so you can see that real audio
 arrived, not silence. Verified originally against a C-Media USB mic and
 a speaking voice (3,014 packets, zero dropped).
+
+**Behind a hub on an ESP32-P4,** set ``FULL_SPEED = True`` below. A USB
+microphone is a full-speed device, and the P4's high-speed port can't reach one
+through a hub without a transaction translator, which the ESP-IDF host lacks.
+At full speed the hub passes it straight through.
 """
 
 import time
@@ -19,6 +24,11 @@ from usbif import uac
 from usbif import uac_audio
 
 SECONDS = 3
+
+# True when the mic is behind a hub on an ESP32-P4: the host then runs at full
+# speed, so the hub passes a full-speed device through. Plugged straight into
+# the port, or on an S3, leave it False.
+FULL_SPEED = False
 
 
 def find_mic(host, timeout_ms=15000):
@@ -52,7 +62,7 @@ def _peak_rms(buf, sample_bytes=2):
 
 
 def main():
-    host = usbif.auto.host(classes=("uac",)).start()
+    host = usbif.auto.host(classes=("uac",), full_speed=FULL_SPEED).start()
     dev_id, ins = find_mic(host)
     if dev_id is None:
         print("no USB audio input found")
