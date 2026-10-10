@@ -50,6 +50,10 @@
 
 extern usb_host_client_handle_t usbif_host_client_get(void);
 extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
+// usbif_host.c: a control transfer this driver stopped waiting for is handed
+// over, and its late callback frees it (usbif#73).
+extern void usbif_host_ctrl_abandon(usb_transfer_t *xfer);
+extern bool usbif_host_ctrl_reclaim(usb_transfer_t *xfer);
 extern void usbif_host_lock(void);
 extern void usbif_host_unlock(void);
 extern int usbif_host_lock_suspend(void);
@@ -122,6 +126,9 @@ static volatile bool usbif_uvc_ctrl_done;
 static usb_transfer_t *volatile usbif_uvc_ctrl_active;
 
 static void usbif_uvc_ctrl_cb(usb_transfer_t *xfer) {
+    if (usbif_host_ctrl_reclaim(xfer)) {
+        return;
+    }
     if (xfer == usbif_uvc_ctrl_active) {
         usbif_uvc_ctrl_done = true;
     }
@@ -158,6 +165,7 @@ static int usbif_uvc_control(uint8_t req_type, uint8_t request, uint16_t value,
     ctrl->num_bytes = sizeof(usb_setup_packet_t) + len;
     ctrl->callback = usbif_uvc_ctrl_cb;
     ctrl->timeout_ms = USBIF_UVC_CTRL_TIMEOUT_MS;
+    ctrl->context = NULL;
     usbif_uvc_ctrl_done = false;
     usbif_uvc_ctrl_active = ctrl;
     if (usb_host_transfer_submit_control(usbif_host_client_get(), ctrl) != ESP_OK) {
@@ -173,10 +181,19 @@ static int usbif_uvc_control(uint8_t req_type, uint8_t request, uint16_t value,
         vTaskDelay(1);
     }
     usbif_host_lock_resume(held);
-    if (!usbif_uvc_ctrl_done) {
+    // Decided under the lock, so a completion can't land between the check
+    // and the hand-over (see usbif_uac_control_on()).
+    usbif_host_lock();
+    bool answered = usbif_uvc_ctrl_done;
+    if (!answered) {
         // Still queued on EP0. Freeing it now is how the library ends up
-        // dereferencing freed memory later; leak it instead.
+        // dereferencing freed memory later; the host frees it from its
+        // callback instead, and host_stop() makes sure that comes.
         usbif_uvc_ctrl_active = NULL;
+        usbif_host_ctrl_abandon(ctrl);
+    }
+    usbif_host_unlock();
+    if (!answered) {
         return -3;
     }
     int status = (int)ctrl->status;

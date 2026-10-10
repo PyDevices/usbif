@@ -56,6 +56,10 @@ extern void usbif_host_lock_debug(const char *tag);
 extern int usbif_host_lock_suspend(void);
 extern void usbif_host_lock_resume(int held);
 extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
+// usbif_host.c: a control transfer this driver stopped waiting for is handed
+// over, and its late callback frees it (usbif#73).
+extern void usbif_host_ctrl_abandon(usb_transfer_t *xfer);
+extern bool usbif_host_ctrl_reclaim(usb_transfer_t *xfer);
 
 // Packets per transfer, and transfers in flight. 8 x 1 ms packets per
 // transfer with 3 in flight gives ~24 ms of scheduled bus time, which is
@@ -347,6 +351,9 @@ static volatile bool usbif_uac_ctrl_done;
 static usb_transfer_t *volatile usbif_uac_ctrl_active;
 
 static void usbif_uac_ctrl_cb(usb_transfer_t *xfer) {
+    if (usbif_host_ctrl_reclaim(xfer)) {
+        return;
+    }
     if (xfer == usbif_uac_ctrl_active) {
         usbif_uac_ctrl_done = true;
     }
@@ -378,6 +385,7 @@ static int usbif_uac_control_on(usb_device_handle_t dev, uint8_t req_type, uint8
     ctrl->num_bytes = sizeof(usb_setup_packet_t) + len;
     ctrl->callback = usbif_uac_ctrl_cb;
     ctrl->timeout_ms = USBIF_UAC_CTRL_TIMEOUT_MS;
+    ctrl->context = NULL;
     usbif_uac_ctrl_done = false;
     usbif_uac_ctrl_active = ctrl;
     esp_err_t err = usb_host_transfer_submit_control(usbif_host_client_get(), ctrl);
@@ -407,19 +415,30 @@ static int usbif_uac_control_on(usb_device_handle_t dev, uint8_t req_type, uint8
         vTaskDelay(1);
     }
     usbif_host_lock_resume(held);
-    printf("usbif_uac: ctrl req=0x%02x val=0x%04x idx=0x%04x len=%u submit=0x%x status=%d actual=%d\n",
-        (unsigned)request, (unsigned)value, (unsigned)index, (unsigned)len,
-        (unsigned)err, (int)ctrl->status, (int)ctrl->actual_num_bytes);
-    if (!usbif_uac_ctrl_done) {
+    // Decided under the lock, which the host task holds while it delivers
+    // callbacks, so a completion can't land between the check and the
+    // hand-over below.
+    usbif_host_lock();
+    bool answered = usbif_uac_ctrl_done;
+    if (!answered) {
         // The device never answered. The transfer is still queued on EP0, so
         // the library will dequeue it eventually and touch this memory --
         // freeing it here is what produced the LoadProhibited panic inside
-        // handle_ep0_dequeue(). Deliberately leaked: one 8-byte transfer,
-        // once, on a device that is already misbehaving, against corrupting
-        // the heap of a board that has to keep running.
+        // handle_ep0_dequeue(). Hand it to the host instead: its callback
+        // frees it when it comes, and host_stop() makes sure it comes.
         usbif_uac_ctrl_active = NULL;
+        usbif_host_ctrl_abandon(ctrl);
+    }
+    usbif_host_unlock();
+    if (!answered) {
+        printf("usbif_uac: ctrl req=0x%02x val=0x%04x idx=0x%04x len=%u: no answer in %d ms, "
+            "left queued\n", (unsigned)request, (unsigned)value, (unsigned)index,
+            (unsigned)len, USBIF_UAC_CTRL_TIMEOUT_MS);
         return -3;
     }
+    printf("usbif_uac: ctrl req=0x%02x val=0x%04x idx=0x%04x len=%u submit=0x%x status=%d actual=%d\n",
+        (unsigned)request, (unsigned)value, (unsigned)index, (unsigned)len,
+        (unsigned)err, (int)ctrl->status, (int)ctrl->actual_num_bytes);
     usbif_uac_ctrl_active = NULL;
     int rc = (ctrl->status == USB_TRANSFER_STATUS_COMPLETED) ? 0 : -4;
     if (rx && rx_len) {

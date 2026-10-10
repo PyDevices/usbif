@@ -223,6 +223,14 @@ bool usbif_host_is_wedged(void) {
 #define USBIF_HOST_RELEASE_STUCK_DEVICES (1)
 #endif
 
+// Teardown retires the control transfers a class driver gave up waiting for
+// by powering the root port off before it closes the devices (usbif#73). 0
+// builds the old teardown, which frees the device with the transfer still
+// queued and leaves the HCD installed; it exists to show that failure.
+#ifndef USBIF_HOST_RELEASE_ABANDONED_CTRL
+#define USBIF_HOST_RELEASE_ABANDONED_CTRL (1)
+#endif
+
 // How long host_stop() waits for the task to finish teardown before it calls
 // the host wedged. Teardown bounds each of its own waits; added up, the worst
 // case is about four seconds (each class driver's close, the 200 ms drain,
@@ -251,6 +259,84 @@ static int usbif_host_lib_num_devices(void) {
     }
     return info.num_devices;
 }
+
+// Control transfers a class driver stopped waiting for (usbif#73).
+//
+// A device that stops answering NAKs a control request forever, and ESP-IDF's
+// host doesn't act on a transfer's timeout_ms, so the transfer stays queued on
+// EP0 and the driver can't free it (the library would touch freed memory when
+// it finally dequeues it). Nothing used to remember it. Closing and freeing
+// the device then went ahead with the transfer still on the pipe: the device
+// object was freed, its EP0 pipe wasn't, and usb_host_uninstall() left the HCD
+// installed while returning ESP_OK, so the next host_start() failed with
+// ESP_ERR_INVALID_STATE (0x103).
+//
+// So a driver that gives up hands the transfer here. Its context is marked,
+// and its callback, whenever the library delivers one, frees it. Teardown
+// sees the count and powers the root port off while the devices are still
+// open, which makes the hub report them gone; the library then flushes EP0,
+// and the callback arrives and frees the transfer. Only then are the devices
+// closed and freed.
+//
+// Both calls run under the host lock: usbif_host_ctrl_abandon() from the
+// driver, and usbif_host_ctrl_reclaim() from a completion callback, which the
+// host task delivers inside its locked pumps.
+static volatile int usbif_host_ctrl_abandoned;
+static const char usbif_host_ctrl_abandoned_tag[] = "usbif abandoned control transfer";
+
+void usbif_host_ctrl_abandon(usb_transfer_t *xfer) {
+    xfer->context = (void *)usbif_host_ctrl_abandoned_tag;
+    usbif_host_ctrl_abandoned++;
+}
+
+bool usbif_host_ctrl_reclaim(usb_transfer_t *xfer) {
+    if (xfer->context != (void *)usbif_host_ctrl_abandoned_tag) {
+        return false;
+    }
+    xfer->context = NULL;
+    usbif_host_ctrl_abandoned--;
+    printf("usbif_host: abandoned control transfer retired (status %d), freed; %d left\n",
+        (int)xfer->status, usbif_host_ctrl_abandoned);
+    usb_host_transfer_free(xfer);
+    return true;
+}
+
+static bool usbif_host_any_slot_in_use(void) {
+    for (int i = 0; i < USBIF_HOST_MAX_DEVS; i++) {
+        if (usbif_host_devs[i].in_use) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Power the root port off and pump until every abandoned control transfer has
+// been retired and the devices it took with it are closed. Teardown calls it
+// before it closes anything itself, while the devices are still open, because
+// a device whose last client closes it is freed at once, EP0 transfer or not.
+#if USBIF_HOST_RELEASE_ABANDONED_CTRL
+static void usbif_host_release_abandoned_ctrl(void) {
+    printf("usbif_host: %d abandoned control transfer(s) -- powering the root port "
+        "off at %d ms\n", usbif_host_ctrl_abandoned, usbif_host_teardown_ms());
+    esp_err_t power_err = usb_host_lib_set_root_port_power(false);
+    printf("usbif_host: root port power off -> 0x%x\n", (unsigned)power_err);
+    int polls = 0;
+    for (int i = 0; i < 100; i++) {
+        uint32_t flags = 0;
+        usbif_host_lock();
+        usb_host_lib_handle_events(0, &flags);
+        usb_host_client_handle_events(usbif_host_client, 0);
+        usbif_host_unlock();
+        polls = i + 1;
+        if (usbif_host_ctrl_abandoned == 0 && !usbif_host_any_slot_in_use()) {
+            break;
+        }
+        vTaskDelay(USBIF_MS_TICKS(10));
+    }
+    printf("usbif_host: %d abandoned transfer(s) left after %d poll(s), at %d ms\n",
+        usbif_host_ctrl_abandoned, polls, usbif_host_teardown_ms());
+}
+#endif
 
 // Set by mod_usbif.c's host_start() before usbif_host_start_c() installs the
 // library, so it is always in place before the client callback can fire.
@@ -713,6 +799,19 @@ static void usbif_host_task(void *arg) {
             printf("usbif_host: closing uac\n");
             usbif_host_uac_close_for_host_stop();
             usbif_host_uvc_close_for_host_stop();
+            #if USBIF_HOST_RELEASE_ABANDONED_CTRL
+            // A control transfer a driver gave up on is still queued on EP0.
+            // Closing the device now would free it with that transfer on the
+            // pipe (usbif#73), so retire it first, while the device is open.
+            if (usbif_host_ctrl_abandoned > 0) {
+                usbif_host_release_abandoned_ctrl();
+            }
+            if (!usbif_host_devs[i].in_use) {
+                // The hub reported it gone once the port was off, and
+                // usbif_host_on_dev_gone() closed it.
+                continue;
+            }
+            #endif
             printf("usbif_host: device_close\n");
             usb_host_device_close(usbif_host_client, usbif_host_devs[i].hdl);
             printf("usbif_host: device_close returned at %d ms\n", usbif_host_teardown_ms());
@@ -764,7 +863,16 @@ static void usbif_host_task(void *arg) {
     // outer hang unfalsifiable from the Python side.
     bool all_free_seen = false;
     int free_wait_ticks = 0;
-    for (int i = 0; i < 100; i++) {
+    if (free_all_err == ESP_OK) {
+        // Nothing was left to free (no device attached, or the ones there
+        // were went with the root port above), and ALL_FREE only follows a
+        // free that had to wait. One pass with no wait collects the
+        // deregistration's own event, which usb_host_uninstall() checks for.
+        uint32_t flags = 0;
+        usb_host_lib_handle_events(0, &flags);
+        all_free_seen = true;
+    }
+    for (int i = 0; i < 100 && !all_free_seen; i++) {
         uint32_t flags = 0;
         usb_host_lib_handle_events(pdMS_TO_TICKS(10), &flags);
         free_wait_ticks = i + 1;
@@ -773,8 +881,12 @@ static void usbif_host_task(void *arg) {
             break;
         }
     }
-    printf("usbif_host: ALL_FREE %s after %d poll(s), at %d ms\n",
-        all_free_seen ? "seen" : "NOT seen -- timed out", free_wait_ticks, usbif_host_teardown_ms());
+    if (free_all_err == ESP_OK) {
+        printf("usbif_host: no device left to free, at %d ms\n", usbif_host_teardown_ms());
+    } else {
+        printf("usbif_host: ALL_FREE %s after %d poll(s), at %d ms\n",
+            all_free_seen ? "seen" : "NOT seen -- timed out", free_wait_ticks, usbif_host_teardown_ms());
+    }
 
     // A device that stopped answering in the middle of enumeration (usbif#65:
     // a webcam left streaming across a board reset, on a socket whose 5 V
@@ -824,6 +936,21 @@ static void usbif_host_task(void *arg) {
             vTaskDelete(NULL);
             return;
         }
+    }
+    #endif
+    #if USBIF_HOST_RELEASE_ABANDONED_CTRL
+    if (usbif_host_ctrl_abandoned > 0) {
+        // A transfer a driver gave up on was never retired, so a pipe still
+        // holds it and usb_host_uninstall() would leave the HCD installed
+        // while returning ESP_OK. Say so instead (usbif#73).
+        usbif_host_task_wedged = true;
+        printf("usbif_host: %d abandoned control transfer(s) never retired -- "
+               "not uninstalling; marked wedged, and host_start() will ask "
+               "for a reset\n", usbif_host_ctrl_abandoned);
+        usbif_host_task_handle = NULL;
+        printf("usbif_host: task exiting, handle cleared, core %d\n", esp_cpu_get_core_id());
+        vTaskDelete(NULL);
+        return;
     }
     #endif
     esp_err_t uninstall_err = usb_host_uninstall();
