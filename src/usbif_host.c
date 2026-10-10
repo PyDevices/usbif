@@ -614,14 +614,22 @@ static void usbif_host_fifo_for(uint16_t classes, usb_host_config_t *config) {
         config->fifo_settings_custom.rx_fifo_lines = 134 * k;
         config->fifo_settings_custom.nptx_fifo_lines = 16 * k;
         config->fifo_settings_custom.ptx_fifo_lines = 50 * k;
-        why = "uac asked for without uvc, so periodic OUT gets 200 bytes";
+        why = "uac asked for without uvc, so periodic OUT gets the room a speaker needs";
     } else {
         why = "the board's Kconfig bias";
     }
-    printf("usbif_host: FIFO split rx=%u nptx=%u ptx=%u lines (%s)\n",
-        (unsigned)config->fifo_settings_custom.rx_fifo_lines,
-        (unsigned)config->fifo_settings_custom.nptx_fifo_lines,
-        (unsigned)config->fifo_settings_custom.ptx_fifo_lines, why);
+    // Lines are 4 bytes. The largest packet each FIFO takes is what a claim
+    // is checked against (IDF's usb_dwc_hal_get_mps_limits(): IN loses two
+    // lines to status words), so print that too: a refused claim is then
+    // readable from this line alone.
+    const unsigned rx = config->fifo_settings_custom.rx_fifo_lines;
+    const unsigned ptx = config->fifo_settings_custom.ptx_fifo_lines;
+    printf("usbif_host: FIFO split rx=%u nptx=%u ptx=%u lines (%s)",
+        rx, (unsigned)config->fifo_settings_custom.nptx_fifo_lines, ptx, why);
+    if (rx) {
+        printf("; largest IN packet %u B, periodic OUT %u B", (rx - 2) * 4, ptx * 4);
+    }
+    printf("\n");
 }
 
 static void usbif_host_task(void *arg) {
