@@ -43,7 +43,10 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "usb/usb_helpers.h"
 #include "usb/usb_host.h"
+
+#include "shared/usbif_uvc_queue.h"
 
 extern usb_host_client_handle_t usbif_host_client_get(void);
 extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
@@ -52,12 +55,9 @@ extern void usbif_host_unlock(void);
 extern int usbif_host_lock_suspend(void);
 extern void usbif_host_lock_resume(int held);
 
-// Packets per transfer and transfers in flight. On a high-speed bus a
-// bInterval of 1 means one transaction per 125 us microframe, so eight
-// packets is one millisecond of schedule -- the same unit the UAC driver
-// uses, which keeps the two drivers' latency arithmetic comparable.
-#define USBIF_UVC_PKTS_PER_XFER (8)
-#define USBIF_UVC_NUM_XFER      (3)
+// The transfer queue is sized in bus time, not packets: see
+// shared/usbif_uvc_queue.h for why a camera on a high-speed host needs more
+// than one FreeRTOS tick of it.
 
 // Ceiling on one packet's DMA buffer: 1024 bytes times three transactions per
 // microframe is the most a high-speed isochronous endpoint can ask for.
@@ -92,7 +92,9 @@ typedef struct {
     usb_device_handle_t dev;
     uint8_t itf, alt, ep;
     uint16_t packet;            // bytes per (micro)frame, mult already applied
-    usb_transfer_t *xfer[USBIF_UVC_NUM_XFER];
+    uint8_t pkts_per_xfer;      // isochronous packets in each transfer
+    uint8_t num_xfer;           // transfers allocated and kept in flight
+    usb_transfer_t *xfer[USBIF_UVC_MAX_XFER];
     volatile uint8_t inflight;
 
     // Frame assembly. Two buffers, not a byte ring: a video frame is only
@@ -265,6 +267,23 @@ int usbif_host_uvc_negotiate(uint32_t dev_id, uint8_t itf, uint8_t format_index,
 
 // --- streaming ----------------------------------------------------------
 
+// The endpoint's period in bus slots, from its descriptor. An isochronous
+// bInterval is an exponent on either bus: 2^(bInterval-1) slots.
+static uint32_t usbif_uvc_interval(usb_device_handle_t dev, uint8_t itf,
+    uint8_t alt, uint8_t ep) {
+    const usb_config_desc_t *cfg = NULL;
+    if (usb_host_get_active_config_descriptor(dev, &cfg) != ESP_OK || cfg == NULL) {
+        return 1;
+    }
+    int offset = 0;
+    const usb_ep_desc_t *epd = usb_parse_endpoint_descriptor_by_address(cfg,
+        itf, alt, ep, &offset);
+    if (epd == NULL || epd->bInterval == 0 || epd->bInterval > 16) {
+        return 1;
+    }
+    return 1u << (epd->bInterval - 1);
+}
+
 static void usbif_uvc_finish_frame(void) {
     if (usbif_uvch.torn || usbif_uvch.fill_len == 0) {
         if (usbif_uvch.fill_len) {
@@ -366,6 +385,13 @@ static int usbif_host_uvc_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
     if (usbif_host_dev_lookup(dev_id, &dev) != 0) {
         return -3;
     }
+    usb_device_info_t info;
+    bool high_speed = usb_host_device_info(dev, &info) == ESP_OK
+        && info.speed == USB_SPEED_HIGH;
+    const usbif_uvc_queue_t queue = usbif_uvc_queue_size(high_speed,
+        usbif_uvc_interval(dev, itf, alt, ep), portTICK_PERIOD_MS);
+    const uint8_t pkts = queue.pkts_per_xfer;
+    const uint8_t nxfer = queue.num_xfer;
     uint8_t *b0 = malloc(frame_bytes);
     uint8_t *b1 = malloc(frame_bytes);
     if (b0 == NULL || b1 == NULL) {
@@ -382,6 +408,7 @@ static int usbif_host_uvc_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
     usbif_uvch.buf[0] = b0;
     usbif_uvch.buf[1] = b1;
     usbif_uvch.buf_size = frame_bytes;
+    usbif_uvch.pkts_per_xfer = pkts;
 
     esp_err_t cerr = usb_host_interface_claim(usbif_host_client_get(), dev, itf, alt);
     printf("usbif_uvc: interface_claim(itf=%u alt=%u) -> 0x%x\n",
@@ -399,30 +426,37 @@ static int usbif_host_uvc_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
     printf("usbif_uvc: SET_INTERFACE(%u, %u) -> %d\n",
         (unsigned)itf, (unsigned)alt, sif);
 
-    const size_t buf = (size_t)packet * USBIF_UVC_PKTS_PER_XFER;
-    for (int i = 0; i < USBIF_UVC_NUM_XFER; i++) {
-        if (usb_host_transfer_alloc(buf, USBIF_UVC_PKTS_PER_XFER,
-                &usbif_uvch.xfer[i]) != ESP_OK) {
-            for (int j = 0; j < i; j++) {
-                usb_host_transfer_free(usbif_uvch.xfer[j]);
-                usbif_uvch.xfer[j] = NULL;
-            }
-            usb_host_interface_release(usbif_host_client_get(), dev, itf);
-            free(b0);
-            free(b1);
-            usbif_uvch.buf[0] = usbif_uvch.buf[1] = NULL;
-            return -6;
+    // Transfers come from DMA-capable internal RAM, which is the scarce kind.
+    // If the whole queue won't fit, stream with what did, as long as that is
+    // no less than the queue this driver always had.
+    const size_t buf = (size_t)packet * pkts;
+    for (int i = 0; i < nxfer; i++) {
+        if (usb_host_transfer_alloc(buf, pkts, &usbif_uvch.xfer[i]) != ESP_OK) {
+            break;
         }
+        usbif_uvch.num_xfer++;
         usbif_uvch.xfer[i]->device_handle = dev;
         usbif_uvch.xfer[i]->bEndpointAddress = ep;
         usbif_uvch.xfer[i]->callback = usbif_uvc_cb;
         usbif_uvch.xfer[i]->num_bytes = (int)buf;
-        for (int p = 0; p < USBIF_UVC_PKTS_PER_XFER; p++) {
+        for (int p = 0; p < pkts; p++) {
             usbif_uvch.xfer[i]->isoc_packet_desc[p].num_bytes = packet;
         }
     }
+    if (usbif_uvch.num_xfer < USBIF_UVC_MIN_XFER) {
+        for (int j = 0; j < usbif_uvch.num_xfer; j++) {
+            usb_host_transfer_free(usbif_uvch.xfer[j]);
+            usbif_uvch.xfer[j] = NULL;
+        }
+        usbif_uvch.num_xfer = 0;
+        usb_host_interface_release(usbif_host_client_get(), dev, itf);
+        free(b0);
+        free(b1);
+        usbif_uvch.buf[0] = usbif_uvch.buf[1] = NULL;
+        return -6;
+    }
     usbif_uvch.open = true;
-    for (int i = 0; i < USBIF_UVC_NUM_XFER; i++) {
+    for (int i = 0; i < usbif_uvch.num_xfer; i++) {
         if (usb_host_transfer_submit(usbif_uvch.xfer[i]) == ESP_OK) {
             usbif_uvch.inflight++;
         } else {
@@ -431,7 +465,7 @@ static int usbif_host_uvc_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
     }
     if (usbif_uvch.inflight == 0) {
         usbif_uvch.open = false;
-        for (int i = 0; i < USBIF_UVC_NUM_XFER; i++) {
+        for (int i = 0; i < usbif_uvch.num_xfer; i++) {
             usb_host_transfer_free(usbif_uvch.xfer[i]);
             usbif_uvch.xfer[i] = NULL;
         }
@@ -441,9 +475,10 @@ static int usbif_host_uvc_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
         usbif_uvch.buf[0] = usbif_uvch.buf[1] = NULL;
         return -7;
     }
-    printf("usbif_uvc: streaming itf %u alt %u ep 0x%02x packet %u frame buf %u\n",
+    printf("usbif_uvc: streaming itf %u alt %u ep 0x%02x packet %u frame buf %u"
+        " (%u transfers of %u packets)\n",
         (unsigned)itf, (unsigned)alt, (unsigned)ep, (unsigned)packet,
-        (unsigned)frame_bytes);
+        (unsigned)frame_bytes, (unsigned)usbif_uvch.num_xfer, (unsigned)pkts);
     return 0;
 }
 
@@ -505,7 +540,7 @@ static void usbif_host_uvc_close_locked(void) {
         vTaskDelay(1);
     }
     usbif_host_lock_resume(held);
-    for (int i = 0; i < USBIF_UVC_NUM_XFER; i++) {
+    for (int i = 0; i < USBIF_UVC_MAX_XFER; i++) {
         if (usbif_uvch.xfer[i]) {
             usb_host_transfer_free(usbif_uvch.xfer[i]);
             usbif_uvch.xfer[i] = NULL;
