@@ -14,9 +14,10 @@ reports overflow instead of dropping in silence.
 The C module surface this expects, which is the contract the native side must
 satisfy:
 
-``_usbif.host_start(classes)``  start the daemon and the class drivers for the
-                               requested class names; returns the set actually
-                               started.
+``_usbif.host_start(classes, full_speed=False)``  start the daemon and the
+                               class drivers for the requested class names;
+                               returns the set actually started. full_speed
+                               holds the root port to full speed.
 ``_usbif.host_stop()``          stop them and release the controller.
 ``_usbif.host_devices()``       tuple of ``(id, vid, pid, product, serial,
                                 classes, speed)`` tuples for attached devices.
@@ -62,10 +63,22 @@ def _require():
 class NativeHost(Host):
     """USB host on hardware, backed by the native module."""
 
-    def __init__(self, classes=None, drain_limit=DRAIN_LIMIT):
+    def __init__(self, classes=None, drain_limit=DRAIN_LIMIT, full_speed=False):
+        """``full_speed=True`` runs the host port at full speed (12 Mbit/s).
+
+        Use it on an ESP32-P4 to reach full- and low-speed devices (keyboards,
+        MIDI controllers, most mice) through a hub. The P4's port is high
+        speed, and a high-speed hub needs a transaction translator to talk to
+        a slower device behind it, which the ESP-IDF host doesn't have. At
+        full speed the hub passes them straight through. High-speed devices
+        still work, at full-speed bandwidth: a webcam picks a smaller or
+        more compressed mode. A device plugged straight into the port needs
+        none of this. On the ESP32-S2 and S3 the port is full speed anyway.
+        """
         super().__init__()
         self.classes = tuple(classes) if classes else None
         self.drain_limit = int(drain_limit)
+        self.full_speed = bool(full_speed)
         self._started = frozenset()
 
     def capabilities(self):
@@ -86,7 +99,13 @@ class NativeHost(Host):
 
     def _start(self):
         wanted = self.classes if self.classes is not None else tuple(self.capabilities())
-        self._started = frozenset(_require().host_start(wanted))
+        if self.full_speed:
+            started = _require().host_start(wanted, full_speed=True)
+        else:
+            # Without the keyword, so firmware from before full_speed existed
+            # still starts.
+            started = _require().host_start(wanted)
+        self._started = frozenset(started)
 
     def _stop(self):
         _require().host_stop()

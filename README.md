@@ -167,8 +167,8 @@ declines interfaces, not devices, and every enumerated device keeps its
 control pipe either way -- so a hub costs two channels before carrying
 anything. Host mode is proven at full speed on the ESP32-S3, and at high
 speed on the ESP32-P4 with a webcam on a port that supplies 5 V; behind a hub
-the P4 sees only high-speed devices
-([#15](https://github.com/PyDevices/usbif/issues/15)). MSC now mounts as a filesystem, read-write
+the P4 reaches full-speed devices when you start the host with
+`full_speed=True` (see [below](#keyboards-and-midi-controllers-behind-a-hub-on-the-esp32-p4)). MSC now mounts as a filesystem, read-write
 (`examples/usb_drive_mount.py` lists a hosted stick; `usb_drive_log.py`
 appends sensor lines to one and reads them back after a remount;
 `usb_drive_read.py` reads a file end to end and checks its SHA-256), with
@@ -206,6 +206,32 @@ own patch), and
 The API design is in [`docs/api-sketch.md`](docs/api-sketch.md).
 
 What's planned next is in [ROADMAP.md](ROADMAP.md).
+
+### Keyboards and MIDI controllers behind a hub on the ESP32-P4
+
+The P4's host port is high speed. Plug a keyboard, a mouse or a MIDI
+controller into it directly and it works. Put it behind a hub and it won't
+enumerate, because a high-speed hub talks to a slower device through a
+transaction translator, which the ESP-IDF host doesn't support. The console
+shows `Connected device is FS, transaction translator (TT) is not supported`.
+
+Start the host at full speed instead, and the hub runs at full speed too and
+passes those devices straight through:
+
+```python
+import usbif.auto
+
+host = usbif.auto.host(classes=("midi", "hid"), full_speed=True).start()
+```
+
+High-speed devices on the same hub still work, at full-speed bandwidth
+(12 Mbit/s): a webcam negotiates a smaller or more compressed mode, and a
+flash drive copies more slowly. So leave it off when everything on the bus is
+high speed, or when the slow device is plugged straight into the port. It
+takes effect when the host starts; to change it, `stop()` and start again. On
+the ESP32-S2 and S3 the port is full speed already, and the option changes
+nothing. Under the hood it sets the controller's `HCFG.FSLSSupp` bit before
+the port is powered.
 
 ## Why the events are drained rather than delivered
 

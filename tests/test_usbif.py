@@ -1864,6 +1864,67 @@ _C920E = bytes.fromhex(
 )
 
 
+class _StartRecorder:
+    """The two host_start() shapes the native module has had, recorded."""
+
+    def __init__(self, takes_full_speed=True):
+        self.calls = []
+        self.takes_full_speed = takes_full_speed
+
+    def capabilities(self):
+        return ("hid", "midi")
+
+    def host_start(self, classes, **kwargs):
+        if kwargs and not self.takes_full_speed:
+            raise TypeError("function doesn't take keyword arguments")
+        self.calls.append((tuple(classes), kwargs))
+        return set(classes)
+
+    def host_stop(self):
+        pass
+
+
+class TestNativeHostFullSpeed(unittest.TestCase):
+    """``host(full_speed=True)`` reaches the C module, and only when asked.
+
+    A P4's high-speed port can't reach a full-speed keyboard behind a hub
+    (no transaction translator in the ESP-IDF host); holding the port to full
+    speed lets the hub pass it through (usbif#15). The default call has to
+    stay the one-argument form, or firmware built before the option existed
+    stops starting at all.
+    """
+
+    def setUp(self):
+        self.saved = native_usb._usbif
+
+    def tearDown(self):
+        native_usb._usbif = self.saved
+
+    def test_full_speed_is_passed_to_host_start(self):
+        fake = native_usb._usbif = _StartRecorder()
+        host = native_usb.NativeHost(classes=("midi",), full_speed=True).start()
+        self.assertEqual(fake.calls, [(("midi",), {"full_speed": True})])
+        self.assertEqual(host.started, frozenset({"midi"}))
+
+    def test_the_default_start_names_no_speed(self):
+        fake = native_usb._usbif = _StartRecorder(takes_full_speed=False)
+        host = native_usb.NativeHost(classes=("midi",)).start()
+        self.assertEqual(fake.calls, [(("midi",), {})])
+        self.assertFalse(host.full_speed)
+
+    def test_auto_host_forwards_full_speed(self):
+        from usbif import auto
+
+        fake = native_usb._usbif = _StartRecorder()
+        saved = auto.select_backend
+        auto.select_backend = lambda: "native_usb"
+        try:
+            auto.host(classes=("hid",), full_speed=True).start()
+        finally:
+            auto.select_backend = saved
+        self.assertEqual(fake.calls, [(("hid",), {"full_speed": True})])
+
+
 class TestDeviceFunctionNames(unittest.TestCase):
     """The costume vocabulary, in all three places it is written down.
 

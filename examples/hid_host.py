@@ -8,9 +8,10 @@ releases by diffing successive reports.
     mpftp run -d COM49 examples/hid_host.py
 
 **Pairing.** A commercial keyboard, or a PyDevices board running
-``hid_keyboard.py``. Needs an S3, or a P4 with the keyboard plugged straight
-into a host port that supplies 5 V: behind a hub the P4 sees only high-speed
-devices (usbif#15).
+``hid_keyboard.py``. Needs an S3, or a P4 with the keyboard on a host port
+that supplies 5 V. Behind a hub on a P4, set ``FULL_SPEED = True`` below: a
+high-speed hub can't reach a full-speed keyboard without a transaction
+translator, which the ESP-IDF host lacks.
 
 **Rollover.** When more keys are held than the report can carry, the decoder
 ignores the ErrorRollOver report rather than emitting garbage -- see the
@@ -22,6 +23,11 @@ import time
 import events
 import usbif.auto
 from usbif.hid_keyboard import KeyboardDecoder
+
+# True when the device is behind a hub on an ESP32-P4: the host then runs at
+# full speed, so the hub passes a full-speed device through. Plugged straight
+# into the port, or on an S3, leave it False.
+FULL_SPEED = False
 
 
 def find_keyboard(host, timeout_ms=15000):
@@ -52,7 +58,7 @@ def keyboard_report(buf, n):
 
 
 def main(seconds=30):
-    host = usbif.auto.host(classes=("hid",)).start()
+    host = usbif.auto.host(classes=("hid",), full_speed=FULL_SPEED).start()
     dev_id = find_keyboard(host)
     if dev_id is None:
         print("no HID device found")
