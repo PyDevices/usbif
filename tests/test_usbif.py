@@ -1479,6 +1479,10 @@ class FakeUacUsbif:
         self.closed = 0
         self.written = bytearray()
         self.incoming = bytearray()
+        # The driver keeps one stream per direction: endpoint -> True while
+        # open, and every endpoint a close was asked for (None = both).
+        self.open_eps = {}
+        self.closed_eps = []
 
     def host_devices(self):
         return ((self.dev_id, 0x08bb, 0x2900, "USB Audio CODEC", None,
@@ -1491,15 +1495,18 @@ class FakeUacUsbif:
 
     def host_uac_open(self, dev_id, itf, alt, ep, mps, rate=0, clock=0, control=0, frame=0,
                       ring=0):
+        if any((e & 0x80) == (ep & 0x80) for e in self.open_eps):
+            raise OSError("host_uac_open failed (-1)")
         self.opened = (dev_id, itf, alt, ep, mps, rate)
         # The 2.0 arguments, kept apart so the 1.0 assertions above read as before.
         self.opened_2_0 = (clock, control, frame)
         self.ring = ring or 8192
+        self.open_eps[ep] = True
 
-    def host_uac_space(self):
+    def host_uac_space(self, ep=None):
         return self.ring - len(self.written)
 
-    def host_uac_capacity(self):
+    def host_uac_capacity(self, ep=None):
         return self.ring
 
     # A 2.0 clock source's answer: one discrete rate unless a test sets
@@ -1522,10 +1529,13 @@ class FakeUacUsbif:
         del self.incoming[:n]
         return n
 
-    def host_uac_queued(self):
+    def host_uac_queued(self, ep=None):
+        if ep is not None and ep & 0x80:
+            return len(self.incoming)
         return len(self.written)
 
-    def host_uac_stats(self):
+    def host_uac_stats(self, ep=None):
+        self.stats_asked = getattr(self, "stats_asked", []) + [ep]
         return (0, len(self.written), 0, 0, 0)
 
     def host_uac_c_sink(self, channels, bits):
@@ -1535,8 +1545,12 @@ class FakeUacUsbif:
         self.c_sink_asked = (channels, bits)
         return b"PCMS" + bytes(52)
 
-    def host_uac_close(self):
+    def host_uac_close(self, ep=None):
         self.closed += 1
+        self.closed_eps.append(ep)
+        for e in list(self.open_eps):
+            if ep is None or (e & 0x80) == (ep & 0x80):
+                del self.open_eps[e]
 
 
 class TestUacAudioSelection(unittest.TestCase):
@@ -1633,6 +1647,50 @@ class TestUacAudioSelection(unittest.TestCase):
         device.open()
         self.assertEqual(fake.opened[3] & 0x80, 0x80)
         device.close()
+
+    def test_output_and_input_run_side_by_side(self):
+        # One stream per direction: playing to a device while recording from
+        # it (a headset, a DAC looped back into its input) opens both, and
+        # each object's calls name its own endpoint.
+        fake = self._install()
+        out = self.mod.output(4)
+        mic = self.mod.input(4)
+        out.open()
+        mic.open()
+        self.assertEqual(len(fake.open_eps), 2)
+        out_ep, in_ep = out.stream.endpoint, mic.stream.endpoint
+        self.assertEqual(out_ep & 0x80, 0)
+        self.assertEqual(in_ep & 0x80, 0x80)
+        out.stats()
+        mic.stats()
+        self.assertEqual(fake.stats_asked, [out_ep, in_ep])
+        fake.incoming.extend(bytes(12))
+        self.assertEqual(mic.available(), 12)
+
+    def test_closing_one_direction_leaves_the_other_running(self):
+        fake = self._install()
+        out = self.mod.output(4)
+        mic = self.mod.input(4)
+        out.open()
+        mic.open()
+        out.close()
+        self.assertEqual(fake.closed_eps, [out.stream.endpoint])
+        self.assertEqual(list(fake.open_eps), [mic.stream.endpoint])
+        mic.close()
+        self.assertEqual(fake.open_eps, {})
+
+    def test_firmware_with_one_stream_still_closes_it(self):
+        # Older firmware's calls take no endpoint; the library falls back to
+        # the call that means "the stream".
+        fake = self._install()
+        closed = []
+        fake.host_uac_close = lambda: closed.append(True)
+        fake.host_uac_capacity = lambda: 8192
+        out = self.mod.output(4)
+        out.open()
+        self.assertEqual(out.capacity(), 8192)
+        out.close()
+        self.assertEqual(closed, [True])
 
     def test_asking_for_an_unavailable_format_raises_and_says_what_is_offered(self):
         # Substituting the nearest rate is how a pitch bug ships. The error

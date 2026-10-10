@@ -15,4 +15,11 @@
 #define USBIF_CLASS_UAC  (1u << 4)
 #define USBIF_CLASS_UVC  (1u << 5)
 
+// Which hosted UAC stream a call means (usbif_host_uac.c keeps one per
+// direction). ANY is the meaning the calls had when there was one stream:
+// whichever is open, playback first; for close, both.
+#define USBIF_HOST_UAC_ANY (-1)
+#define USBIF_HOST_UAC_OUT (0)
+#define USBIF_HOST_UAC_IN  (1)
+
 #endif // USBIF_CLASSES_H
