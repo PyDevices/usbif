@@ -68,6 +68,11 @@ jobs:
              -o /tmp/test_midi_packets tests/test_midi_packets.c \
              src/shared/usbif_midi_packet.c
           /tmp/test_midi_packets
+      - name: Build and run the UVC host queue-size tests
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+             -o /tmp/test_uvc_queue tests/test_uvc_queue.c
+          /tmp/test_uvc_queue
 
   patches:
     # The patch queue is only useful if it still applies. This catches the

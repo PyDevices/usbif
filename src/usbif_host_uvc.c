@@ -46,6 +46,8 @@
 #include "usb/usb_helpers.h"
 #include "usb/usb_host.h"
 
+#include "shared/usbif_uvc_queue.h"
+
 extern usb_host_client_handle_t usbif_host_client_get(void);
 extern int usbif_host_dev_lookup(uint32_t dev_id, usb_device_handle_t *out);
 extern void usbif_host_lock(void);
@@ -53,34 +55,9 @@ extern void usbif_host_unlock(void);
 extern int usbif_host_lock_suspend(void);
 extern void usbif_host_lock_resume(int held);
 
-// How much isochronous schedule is kept queued with the controller.
-//
-// Completions reach this driver only when the host task pumps the USB
-// library, and it pumps once per FreeRTOS tick: every 10 ms at 100 Hz. A
-// transfer that completes just after a pump waits a whole tick to be
-// resubmitted, so the queue has to hold more than a tick of schedule or the
-// endpoint goes unpolled until the next pump. An audio stream would notice
-// that as a gap. A camera doesn't show it as one: it keeps the frame's bytes
-// in its own FIFO, overflows it, and goes on sending a frame of the right
-// size whose rows come from the wrong places. That was the scrambled YUY2 on
-// the ESP32-P4's high-speed host, where three transfers of eight
-// microframes covered 3 ms of every 10 ms tick.
-//
-// So the queue is sized in time, not in packets: at least
-// USBIF_UVC_QUEUE_TICKS ticks of bus time, in transfers of at most
-// USBIF_UVC_HS_PKTS_PER_XFER packets on a high-speed bus (4 ms at one packet a
-// microframe) or USBIF_UVC_FS_PKTS_PER_XFER on a full-speed one (a packet is a
-// whole millisecond there).
-#define USBIF_UVC_HS_PKTS_PER_XFER (32)
-#define USBIF_UVC_FS_PKTS_PER_XFER (8)
-#define USBIF_UVC_QUEUE_TICKS      (3)
-#define USBIF_UVC_MIN_XFER         (3)
-#define USBIF_UVC_MAX_XFER         (12)
-
-// The host controller driver keeps one transfer's packets in a list of 64
-// (micro)frame slots, three of them held back as timing margin, so a transfer
-// may span at most 61 slots including the ones its interval skips.
-#define USBIF_UVC_MAX_XFER_SLOTS   (61)
+// The transfer queue is sized in bus time, not packets: see
+// shared/usbif_uvc_queue.h for why a camera on a high-speed host needs more
+// than one FreeRTOS tick of it.
 
 // Ceiling on one packet's DMA buffer: 1024 bytes times three transactions per
 // microframe is the most a high-speed isochronous endpoint can ask for.
@@ -290,34 +267,6 @@ int usbif_host_uvc_negotiate(uint32_t dev_id, uint8_t itf, uint8_t format_index,
 
 // --- streaming ----------------------------------------------------------
 
-// Size the transfer queue for this endpoint (see USBIF_UVC_QUEUE_TICKS).
-// `interval` is the endpoint's period in bus slots: microframes on a
-// high-speed bus, frames on a full-speed one.
-static void usbif_uvc_geometry(bool high_speed, uint32_t interval,
-    uint8_t *pkts_out, uint8_t *nxfer_out) {
-    if (interval == 0) {
-        interval = 1;
-    }
-    uint32_t pkts = high_speed ? USBIF_UVC_HS_PKTS_PER_XFER : USBIF_UVC_FS_PKTS_PER_XFER;
-    if (pkts * interval > USBIF_UVC_MAX_XFER_SLOTS) {
-        pkts = USBIF_UVC_MAX_XFER_SLOTS / interval;
-        if (pkts == 0) {
-            pkts = 1;
-        }
-    }
-    const uint32_t slot_us = high_speed ? 125 : 1000;
-    const uint32_t xfer_us = pkts * interval * slot_us;
-    const uint32_t queue_us = (uint32_t)USBIF_UVC_QUEUE_TICKS * portTICK_PERIOD_MS * 1000;
-    uint32_t nxfer = (queue_us + xfer_us - 1) / xfer_us;
-    if (nxfer < USBIF_UVC_MIN_XFER) {
-        nxfer = USBIF_UVC_MIN_XFER;
-    } else if (nxfer > USBIF_UVC_MAX_XFER) {
-        nxfer = USBIF_UVC_MAX_XFER;
-    }
-    *pkts_out = (uint8_t)pkts;
-    *nxfer_out = (uint8_t)nxfer;
-}
-
 // The endpoint's period in bus slots, from its descriptor. An isochronous
 // bInterval is an exponent on either bus: 2^(bInterval-1) slots.
 static uint32_t usbif_uvc_interval(usb_device_handle_t dev, uint8_t itf,
@@ -439,9 +388,10 @@ static int usbif_host_uvc_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
     usb_device_info_t info;
     bool high_speed = usb_host_device_info(dev, &info) == ESP_OK
         && info.speed == USB_SPEED_HIGH;
-    uint8_t pkts, nxfer;
-    usbif_uvc_geometry(high_speed, usbif_uvc_interval(dev, itf, alt, ep),
-        &pkts, &nxfer);
+    const usbif_uvc_queue_t queue = usbif_uvc_queue_size(high_speed,
+        usbif_uvc_interval(dev, itf, alt, ep), portTICK_PERIOD_MS);
+    const uint8_t pkts = queue.pkts_per_xfer;
+    const uint8_t nxfer = queue.num_xfer;
     uint8_t *b0 = malloc(frame_bytes);
     uint8_t *b1 = malloc(frame_bytes);
     if (b0 == NULL || b1 == NULL) {
