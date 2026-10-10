@@ -23,8 +23,17 @@ CDC cuts a native-USB session mid-run).
 ``board_peripherals``: the pump owns the I2S channel, not the ES8311. Without
 enabling the speaker amp you get perfect byte counters and silence -- the
 failure mode that ate an afternoon in Phase 4.
+
+**Spectrum.** On a board with a display (a ``board_config`` with
+``display_drv``), the panel shows a spectrum of what the computer plays, if
+pydevices-examples' ``spectrum`` analyzer is on the board: its
+``lib/examples/spectrum`` folder copied to ``/lib/spectrum`` (or installed with
+``mip``). A headless board, or one without the analyzer, plays the same and
+says why there's no spectrum.
 """
 
+import os
+import sys
 import time
 
 import board_peripherals as bp
@@ -102,7 +111,56 @@ def _wire_rate(capability):
     return capability.default.rate
 
 
+def _find_spectrum():
+    """The folder holding the spectrum analyzer, or None."""
+    here = __file__.replace("\\", "/").rsplit("/", 1)[0] if "/" in __file__ else "."
+    for folder in (here + "/spectrum", here + "/examples/spectrum", "/lib/spectrum", "/lib/examples/spectrum"):
+        try:
+            os.stat(folder + "/analyzer.py")
+        except OSError:
+            continue
+        return folder
+    return None
+
+
+def _spectrum():
+    """Start the spectrum on the board's display; return its app, or None.
+
+    The analyzer's modules import each other by plain name, so its folder goes
+    on ``sys.path`` and ``analyzer`` is imported directly (importing the
+    ``spectrum`` package would start its demo instead).
+    """
+    try:
+        import board_config
+    except ImportError:
+        return None  # a headless board: board_peripherals only
+    display_drv = getattr(board_config, "display_drv", None)
+    if display_drv is None:
+        return None
+    folder = _find_spectrum()
+    if folder is None:
+        print("no spectrum: copy pydevices-examples' lib/examples/spectrum to /lib/spectrum")
+        return None
+    if folder not in sys.path:
+        sys.path.append(folder)
+    try:
+        import appdev
+        from analyzer import Spectrum, levels_for_soundcard
+
+        meter = Spectrum(display_drv, levels_for_soundcard())
+    except (ImportError, ValueError) as error:
+        print("no spectrum:", error)
+        return None
+    # A panel that presents just the rows the meter changed has the app's
+    # whole-frame refresh turned off.
+    app = appdev.App(board_config, refresh_period=0 if meter.present_rows else None)
+    meter.start(app)
+    print("spectrum: on the display, from", folder)
+    return app
+
+
 def main():
+    _spectrum()  # before the card, as the meter attaches to its pump
     dev = usbif.auto.device()
     wire = _wire()
     bclk, ws, dout, mclk = wire.sck, wire.ws, wire.sd, wire.mck
