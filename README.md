@@ -129,7 +129,11 @@ in C by another native module, the interpreter need not carry it at all:
 `UacHostOutput.c_sink()` hands that module a sink it writes from its own
 task, described in [src/pcm_c_sink.h](src/pcm_c_sink.h)
 ([#43](https://github.com/PyDevices/usbif/issues/43)). Not yet run on
-hardware.
+hardware. A hosted device can play and record at once: open
+`uac_audio.output(dev)` and `uac_audio.input(dev)` side by side, on one
+device or two. On an ESP32-P4 hosting a USB-C headset dongle with its output
+looped into its mic, both ran 30 s with not one packet lost either way
+([tests/hardware/uac_duplex_loopback.py](tests/hardware/uac_duplex_loopback.py)).
 
 **Not yet working, said precisely:** macOS
 desktop support, which sits at the [community-verified

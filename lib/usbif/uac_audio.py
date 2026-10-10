@@ -136,8 +136,27 @@ def _ring_bytes(stream, rate, ring_ms):
     return max(1, frames) * frame
 
 
+def _per_stream(call, endpoint):
+    """``call(endpoint)``: the driver keeps one stream per direction.
+
+    Playback and capture can run at once, on one device or two, so the calls
+    that could mean either name the stream by its endpoint. Firmware from
+    before that kept one stream and takes no argument; there the call means
+    the only stream there is.
+    """
+    try:
+        return call(endpoint)
+    except TypeError:
+        return call()
+
+
 class _UacHostMixin:
-    """Shared open/close over the native UAC host driver."""
+    """Shared open/close over the native UAC host driver.
+
+    One `output` and one `input` can be open together, on the same device
+    (a headset, or a sound card's output looped into its input) or on two.
+    Closing one leaves the other running.
+    """
 
     def _uac_open(self, stream):
         _usbif.host_uac_open(self._dev_id, stream.interface, stream.alt,
@@ -147,7 +166,7 @@ class _UacHostMixin:
                              _ring_bytes(stream, self._rate, self._ring_ms))
 
     def _close(self):
-        _usbif.host_uac_close()
+        _per_stream(_usbif.host_uac_close, self._stream.endpoint)
 
     @property
     def stream(self):
@@ -156,7 +175,7 @@ class _UacHostMixin:
 
     def capacity(self):
         """The ring's size in bytes, as opened; 0 while closed."""
-        return max(0, _usbif.host_uac_capacity())
+        return max(0, _per_stream(_usbif.host_uac_capacity, self._stream.endpoint))
 
     def stats(self):
         """``(packets, bytes, dropped, starved, errors, empty)`` from the driver.
@@ -165,9 +184,10 @@ class _UacHostMixin:
         of three things, and lumping them together loses the answer: the ring
         overflowed because Python was late (``dropped``), the ring was empty
         when the bus asked (``starved``), or the bus itself reported a bad
-        packet (``errors``).
+        packet (``errors``). A capture stream also counts ``empty``: packets
+        that completed carrying nothing. Each direction has its own counters.
         """
-        return _usbif.host_uac_stats()
+        return _per_stream(_usbif.host_uac_stats, self._stream.endpoint)
 
 
 class UacHostOutput(_UacHostMixin, PCMOutput):
@@ -213,13 +233,13 @@ class UacHostOutput(_UacHostMixin, PCMOutput):
 
     def space(self):
         """Bytes a write can take without coming up short, in whole frames."""
-        room = _usbif.host_uac_space()
+        room = _per_stream(_usbif.host_uac_space, self._stream.endpoint)
         if room <= 0:
             return 0
         return room - room % self.format.frame_size
 
     def queued_size(self):
-        queued = _usbif.host_uac_queued()
+        queued = _per_stream(_usbif.host_uac_queued, self._stream.endpoint)
         return max(0, queued)
 
     def c_sink(self):
@@ -240,7 +260,11 @@ class UacHostOutput(_UacHostMixin, PCMOutput):
 
 
 class UacHostInput(_UacHostMixin, PCMInput):
-    """A hosted USB microphone, as a ``PCMInput``."""
+    """A hosted USB microphone, as a ``PCMInput``.
+
+    It can run beside a `UacHostOutput`, on the same device or another.
+    `available` says how many captured bytes are waiting.
+    """
 
     def __init__(self, dev_id, stream, rate, *, ring_ms=None, **kwargs):
         PCMInput.__init__(self, AudioFormat(rate, stream.channels, stream.bits),
@@ -255,6 +279,10 @@ class UacHostInput(_UacHostMixin, PCMInput):
 
     def _readinto(self, buf):
         return _usbif.host_uac_read(buf)
+
+    def available(self):
+        """Captured bytes waiting in the ring, ready for a read."""
+        return max(0, _per_stream(_usbif.host_uac_queued, self._stream.endpoint))
 
 
 def output(dev_id, *, rate=None, channels=None, bits=None, ring_ms=None, **kwargs):

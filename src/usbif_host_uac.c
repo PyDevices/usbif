@@ -47,6 +47,7 @@
 #include "shared/usbif_byte_ring.h"
 #include "shared/usbif_pcm_sink.h"
 #include "pcm_c_sink.h"
+#include "usbif_classes.h"
 
 extern usb_host_client_handle_t usbif_host_client_get(void);
 extern void usbif_host_lock(void);
@@ -160,15 +161,29 @@ typedef struct {
     // stream sounds wrong the first question is always whether bytes are
     // being lost, and where.
     volatile uint32_t packets, bytes, dropped, starved, errors, empty;
+    uint32_t cb_count;          // the first few callbacks are printed
 } usbif_uac_host_t;
 
-static usbif_uac_host_t usbif_uach;
+// Two streams, one per direction, so a board can play to a device and record
+// from it at once -- a headset, or a DAC with its output looped back into its
+// input -- or play to one device while recording from another. Each has its
+// own interface, endpoint, transfers, ring and counters; a transfer carries
+// its stream in `context`, so the callbacks never have to ask which one.
+// One per direction rather than a pool because that is what the class needs:
+// a second playback stream to another device is a mixer's job, not a bus's.
+#define USBIF_UAC_OUT (0)
+#define USBIF_UAC_IN  (1)
+static usbif_uac_host_t usbif_uach[2];
+
+static inline usbif_uac_host_t *usbif_uac_slot(uint8_t ep) {
+    return &usbif_uach[(ep & 0x80) ? USBIF_UAC_IN : USBIF_UAC_OUT];
+}
 
 // The playback ring's writers go through this gate (usbif#43), the
-// interpreter's and a usermod task's alike. It lives outside usbif_uach
-// because open() zeroes that, and the gate's generation count must survive
-// from one stream to the next: a sink issued for a stream that has closed
-// stays closed. See shared/usbif_pcm_sink.h for the guarantee.
+// interpreter's and a usermod task's alike. Only the OUT stream has one. It
+// lives outside usbif_uach because open() zeroes that stream, and the gate's
+// generation count must survive from one stream to the next: a sink issued
+// for a stream that has closed stays closed. See shared/usbif_pcm_sink.h for the guarantee.
 static usbif_pcm_sink_t usbif_uac_sink;
 static bool usbif_uac_sink_ready;
 
@@ -178,7 +193,7 @@ static void usbif_uac_sink_wait(void) {
 
 static void usbif_uac_sink_setup(void) {
     if (!usbif_uac_sink_ready) {
-        usbif_pcm_sink_init(&usbif_uac_sink, &usbif_uach.ring, usbif_uac_sink_wait);
+        usbif_pcm_sink_init(&usbif_uac_sink, &usbif_uach[USBIF_UAC_OUT].ring, usbif_uac_sink_wait);
         usbif_uac_sink_ready = true;
     }
 }
@@ -189,25 +204,25 @@ static void usbif_uac_sink_setup(void) {
 // Python reads; on OUT the reverse. The ring itself is shared/usbif_byte_ring,
 // tested on the host; this file only sizes and places its storage.
 
-static inline uint32_t usbif_uac_ring_used(void) {
-    return usbif_byte_ring_used(&usbif_uach.ring);
+static inline uint32_t usbif_uac_ring_used(usbif_uac_host_t *s) {
+    return usbif_byte_ring_used(&s->ring);
 }
 
-static inline uint32_t usbif_uac_ring_free(void) {
-    return usbif_byte_ring_free(&usbif_uach.ring);
+static inline uint32_t usbif_uac_ring_free(usbif_uac_host_t *s) {
+    return usbif_byte_ring_free(&s->ring);
 }
 
-static void usbif_uac_ring_push(const uint8_t *data, uint32_t len) {
-    if (usbif_byte_ring_push(&usbif_uach.ring, data, len) < len) {
-        usbif_uach.dropped++;       // the tail of this packet, not the ring
+static void usbif_uac_ring_push(usbif_uac_host_t *s, const uint8_t *data, uint32_t len) {
+    if (usbif_byte_ring_push(&s->ring, data, len) < len) {
+        s->dropped++;       // the tail of this packet, not the ring
     }
 }
 
-static uint32_t usbif_uac_ring_pop(uint8_t *out, uint32_t max) {
-    return usbif_byte_ring_pop(&usbif_uach.ring, out, max);
+static uint32_t usbif_uac_ring_pop(usbif_uac_host_t *s, uint8_t *out, uint32_t max) {
+    return usbif_byte_ring_pop(&s->ring, out, max);
 }
 
-static bool usbif_uac_ring_alloc(uint32_t size) {
+static bool usbif_uac_ring_alloc(usbif_uac_host_t *s, uint32_t size) {
     const uint32_t internal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
     const uint32_t psram = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     const bool small = size <= USBIF_UAC_RING_INTERNAL;
@@ -218,63 +233,63 @@ static bool usbif_uac_ring_alloc(uint32_t size) {
     if (mem == NULL) {
         return false;
     }
-    usbif_uach.ring_mem = mem;
-    usbif_byte_ring_init(&usbif_uach.ring, mem, size);
+    s->ring_mem = mem;
+    usbif_byte_ring_init(&s->ring, mem, size);
     return true;
 }
 
-static void usbif_uac_ring_release(void) {
-    if (usbif_uach.ring_mem) {
-        heap_caps_free(usbif_uach.ring_mem);
-        usbif_uach.ring_mem = NULL;
+static void usbif_uac_ring_release(usbif_uac_host_t *s) {
+    if (s->ring_mem) {
+        heap_caps_free(s->ring_mem);
+        s->ring_mem = NULL;
     }
-    usbif_byte_ring_init(&usbif_uach.ring, NULL, 0);
+    usbif_byte_ring_init(&s->ring, NULL, 0);
 }
 
 // --- transfer plumbing --------------------------------------------------
 
-static void usbif_uac_prepare(usb_transfer_t *xfer) {
+static void usbif_uac_prepare(usbif_uac_host_t *s, usb_transfer_t *xfer) {
     // A capture transfer asks for a full packet in every interval. A playback
     // transfer carries whatever the ring has: a short packet is legal and is
     // how an underrun is expressed on the wire, rather than by stalling.
-    xfer->device_handle = usbif_uach.dev;
-    xfer->bEndpointAddress = usbif_uach.ep;
+    xfer->device_handle = s->dev;
+    xfer->bEndpointAddress = s->ep;
     // num_isoc_packets is const in usb_transfer_t: it is fixed by
     // usb_host_transfer_alloc() and describes how the buffer is carved up, so
     // it is a property of the allocation rather than of this submission.
     uint32_t total = 0;
     for (int i = 0; i < USBIF_UAC_PKTS_PER_XFER; i++) {
-        uint32_t want = usbif_uach.mps;
-        if (!usbif_uach.is_in && usbif_uach.frame && usbif_uach.rate) {
+        uint32_t want = s->mps;
+        if (!s->is_in && s->frame && s->rate) {
             // One millisecond of audio per packet, the remainder carried:
             // 44.1 kHz sends 44 frames then 45 in the right proportion. The
             // host is full-speed today (usbif#3 parks the P4's), so the
             // interval is a millisecond.
-            usbif_uach.acc += usbif_uach.rate;
-            const uint32_t frames = usbif_uach.acc / 1000;
-            usbif_uach.acc -= frames * 1000;
-            want = frames * usbif_uach.frame;
-            if (want > usbif_uach.mps) {
-                want = usbif_uach.mps;
+            s->acc += s->rate;
+            const uint32_t frames = s->acc / 1000;
+            s->acc -= frames * 1000;
+            want = frames * s->frame;
+            if (want > s->mps) {
+                want = s->mps;
             }
         }
-        if (!usbif_uach.is_in) {
+        if (!s->is_in) {
             // Playback always sends a full packet. Where the ring is short,
             // the remainder is silence -- an underrun in audio is silence,
             // not a stall, and the stream must keep its slot on the bus.
-            uint32_t have = usbif_uac_ring_used();
+            uint32_t have = usbif_uac_ring_used(s);
             uint32_t take = have < want ? have : want;
-            if (usbif_uach.frame) {
+            if (s->frame) {
                 // Whole frames only: popping half a frame into a packet
                 // padded with silence would shift every sample after it.
-                take -= take % usbif_uach.frame;
+                take -= take % s->frame;
             }
             if (take) {
-                usbif_uac_ring_pop(xfer->data_buffer + total, take);
+                usbif_uac_ring_pop(s, xfer->data_buffer + total, take);
             }
             if (take < want) {
                 memset(xfer->data_buffer + total + take, 0, want - take);
-                usbif_uach.starved++;
+                s->starved++;
             }
         }
         xfer->isoc_packet_desc[i].num_bytes = want;
@@ -288,59 +303,58 @@ static void usbif_uac_prepare(usb_transfer_t *xfer) {
     xfer->num_bytes = total;
 }
 
-static volatile uint32_t usbif_uac_cb_count;
-
 static void usbif_uac_cb(usb_transfer_t *xfer) {
-    if (usbif_uac_cb_count < 4) {
-        printf("usbif_uac: cb#%u status=%d actual=%d pkts=%d pkt0=%d/%d\n",
-            (unsigned)usbif_uac_cb_count, (int)xfer->status,
+    usbif_uac_host_t *s = (usbif_uac_host_t *)xfer->context;
+    if (s->cb_count < 4) {
+        printf("usbif_uac: %s cb#%u status=%d actual=%d pkts=%d pkt0=%d/%d\n",
+            s->is_in ? "in" : "out", (unsigned)s->cb_count, (int)xfer->status,
             (int)xfer->actual_num_bytes, (int)xfer->num_isoc_packets,
             (int)xfer->isoc_packet_desc[0].status,
             (int)xfer->isoc_packet_desc[0].actual_num_bytes);
     }
-    usbif_uac_cb_count++;
-    if (!usbif_uach.open) {
-        usbif_uach.inflight--;
+    s->cb_count++;
+    if (!s->open) {
+        s->inflight--;
         return;
     }
-    if (usbif_uach.is_in) {
+    if (s->is_in) {
         uint32_t offset = 0;
         for (int i = 0; i < xfer->num_isoc_packets; i++) {
             usb_isoc_packet_desc_t *pkt = &xfer->isoc_packet_desc[i];
             if (pkt->status == USB_TRANSFER_STATUS_COMPLETED && pkt->actual_num_bytes) {
-                usbif_uac_ring_push(xfer->data_buffer + offset, pkt->actual_num_bytes);
-                usbif_uach.bytes += pkt->actual_num_bytes;
-                usbif_uach.packets++;
+                usbif_uac_ring_push(s, xfer->data_buffer + offset, pkt->actual_num_bytes);
+                s->bytes += pkt->actual_num_bytes;
+                s->packets++;
             } else if (pkt->status != USB_TRANSFER_STATUS_COMPLETED) {
-                usbif_uach.errors++;
+                s->errors++;
             } else {
                 // Completed carrying nothing. Counted separately because it
                 // is neither success nor error, and leaving it uncounted made
                 // every statistic read zero while the device streamed
                 // silence -- indistinguishable from never having started.
-                usbif_uach.empty++;
+                s->empty++;
             }
             // Packets are laid out at their *requested* size, not their
             // actual one -- the next packet's data starts where this one's
             // buffer ended, however few bytes actually arrived. Advancing by
             // actual_num_bytes here is the classic isochronous read bug and
             // produces audio that is subtly, progressively wrong.
-            offset += usbif_uach.mps;
+            offset += s->mps;
         }
     } else {
         for (int i = 0; i < xfer->num_isoc_packets; i++) {
             if (xfer->isoc_packet_desc[i].status == USB_TRANSFER_STATUS_COMPLETED) {
-                usbif_uach.bytes += xfer->isoc_packet_desc[i].actual_num_bytes;
-                usbif_uach.packets++;
+                s->bytes += xfer->isoc_packet_desc[i].actual_num_bytes;
+                s->packets++;
             } else {
-                usbif_uach.errors++;
+                s->errors++;
             }
         }
     }
-    usbif_uac_prepare(xfer);
+    usbif_uac_prepare(s, xfer);
     if (usb_host_transfer_submit(xfer) != ESP_OK) {
-        usbif_uach.inflight--;
-        usbif_uach.errors++;
+        s->inflight--;
+        s->errors++;
     }
 }
 
@@ -464,9 +478,9 @@ static int usbif_uac_control_on(usb_device_handle_t dev, uint8_t req_type, uint8
     return rc;
 }
 
-static int usbif_uac_control(uint8_t req_type, uint8_t request, uint16_t value,
-    uint16_t index, const uint8_t *payload, uint16_t len) {
-    return usbif_uac_control_on(usbif_uach.dev, req_type, request, value, index,
+static int usbif_uac_control(usbif_uac_host_t *s, uint8_t req_type, uint8_t request,
+    uint16_t value, uint16_t index, const uint8_t *payload, uint16_t len) {
+    return usbif_uac_control_on(s->dev, req_type, request, value, index,
         payload, len, NULL, NULL);
 }
 
@@ -480,32 +494,32 @@ static int usbif_uac_control(uint8_t req_type, uint8_t request, uint16_t value,
 // polls and every isochronous packet completes with zero bytes. Measured
 // exactly that way before this call existed: submits fine, callbacks fire,
 // status COMPLETED, actual_num_bytes 0, forever.
-static int usbif_uac_set_interface(uint8_t itf, uint8_t alt) {
-    return usbif_uac_control(0x01, 0x0B, alt, itf, NULL, 0);
+static int usbif_uac_set_interface(usbif_uac_host_t *s, uint8_t itf, uint8_t alt) {
+    return usbif_uac_control(s, 0x01, 0x0B, alt, itf, NULL, 0);
 }
 
 // Ask the device to run at `rate`. UAC 1.0 puts sampling frequency in an
 // *endpoint* control, three bytes little-endian. A device with a single fixed
 // rate may STALL this, which is not fatal -- it is already running at the only
 // rate it has -- so the result is reported and not treated as failure.
-static int usbif_uac_set_rate(uint32_t rate) {
-    if (usbif_uach.clock) {
+static int usbif_uac_set_rate(usbif_uac_host_t *s, uint32_t rate) {
+    if (s->clock) {
         // 2.0: CUR on the clock source, four bytes.
         uint8_t cur[4] = {
             (uint8_t)(rate & 0xFF), (uint8_t)((rate >> 8) & 0xFF),
             (uint8_t)((rate >> 16) & 0xFF), (uint8_t)((rate >> 24) & 0xFF),
         };
-        return usbif_uac_control(UAC2_REQTYPE_SET_ITF, UAC2_CUR,
+        return usbif_uac_control(s, UAC2_REQTYPE_SET_ITF, UAC2_CUR,
             (uint16_t)(UAC2_CS_SAM_FREQ_CONTROL << 8),
-            (uint16_t)((usbif_uach.clock << 8) | usbif_uach.control), cur, 4);
+            (uint16_t)((s->clock << 8) | s->control), cur, 4);
     }
     uint8_t payload[3] = {
         (uint8_t)(rate & 0xFF),
         (uint8_t)((rate >> 8) & 0xFF),
         (uint8_t)((rate >> 16) & 0xFF),
     };
-    return usbif_uac_control(UAC_REQTYPE_SET_EP, UAC_SET_CUR,
-        (uint16_t)(UAC_SAMPLING_FREQ_CONTROL << 8), usbif_uach.ep, payload, 3);
+    return usbif_uac_control(s, UAC_REQTYPE_SET_EP, UAC_SET_CUR,
+        (uint16_t)(UAC_SAMPLING_FREQ_CONTROL << 8), s->ep, payload, 3);
 }
 
 // --- public API ---------------------------------------------------------
@@ -560,9 +574,13 @@ int usbif_host_uac_clock_ranges(uint32_t dev_id, uint8_t control_itf, uint8_t cl
 static int usbif_host_uac_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
     uint16_t mps, uint32_t rate, uint8_t clock, uint8_t control, uint16_t frame,
     uint32_t ring_bytes) {
-    if (usbif_uach.open) {
+    // The endpoint's direction picks the stream: one playback and one capture
+    // may run at once, on one device or on two.
+    usbif_uac_host_t *s = usbif_uac_slot(ep);
+    if (s->open) {
         return -1;
     }
+    const usbif_uac_host_t *other = &usbif_uach[(ep & 0x80) ? USBIF_UAC_OUT : USBIF_UAC_IN];
     if (mps == 0 || mps > USBIF_UAC_MAX_MPS) {
         return -2;
     }
@@ -580,88 +598,97 @@ static int usbif_host_uac_open_locked(uint32_t dev_id, uint8_t itf, uint8_t alt,
     if (usbif_host_dev_lookup(dev_id, &dev) != 0) {
         return -3;
     }
-    memset(&usbif_uach, 0, sizeof(usbif_uach));
-    usbif_uach.dev = dev;
-    usbif_uach.itf = itf;
-    usbif_uach.alt = alt;
-    usbif_uach.ep = ep;
-    usbif_uach.mps = mps;
-    usbif_uach.rate = rate;
-    usbif_uach.clock = clock;
-    usbif_uach.control = control;
-    usbif_uach.frame = frame;
-    usbif_uach.acc = 0;
-    usbif_uach.is_in = (ep & 0x80) != 0;
-
-    // Claiming with the chosen alternate setting is what starts the device
-    // reserving isochronous bandwidth. Alt 0 carries no endpoint by
-    // specification, so claiming it and then submitting would fail in a way
-    // that looks like a driver bug rather than a wrong argument.
+    // Alt 0 carries no endpoint by specification, so claiming it and then
+    // submitting would fail in a way that looks like a driver bug rather than
+    // a wrong argument.
     if (alt == 0) {
         return -4;
     }
-    if (!usbif_uac_ring_alloc(ring_bytes)) {
+    // The two streams of one device are two interfaces. A device that put
+    // both directions on one interface would have them share an alternate
+    // setting, and claiming it twice is not something either stream can own.
+    if (other->open && other->dev == dev && other->itf == itf) {
+        return -10;
+    }
+    memset(s, 0, sizeof(*s));
+    s->dev = dev;
+    s->itf = itf;
+    s->alt = alt;
+    s->ep = ep;
+    s->mps = mps;
+    s->rate = rate;
+    s->clock = clock;
+    s->control = control;
+    s->frame = frame;
+    s->acc = 0;
+    s->is_in = (ep & 0x80) != 0;
+
+    // Claiming with the chosen alternate setting is what starts the device
+    // reserving isochronous bandwidth.
+    if (!usbif_uac_ring_alloc(s, ring_bytes)) {
         return -8;
     }
     esp_err_t cerr = usb_host_interface_claim(usbif_host_client_get(), dev, itf, alt);
     printf("usbif_uac: interface_claim(itf=%u alt=%u) -> 0x%x\n",
         (unsigned)itf, (unsigned)alt, (unsigned)cerr);
     if (cerr != ESP_OK) {
-        usbif_uac_ring_release();
+        usbif_uac_ring_release(s);
         return -5;
     }
-    int sif = usbif_uac_set_interface(itf, alt);
+    int sif = usbif_uac_set_interface(s, itf, alt);
     printf("usbif_uac: SET_INTERFACE(%u, %u) -> %d\n", (unsigned)itf, (unsigned)alt, sif);
     if (rate) {
-        usbif_uac_set_rate(rate);   // advisory: a fixed-rate device may STALL
+        usbif_uac_set_rate(s, rate);   // advisory: a fixed-rate device may STALL
     }
 
     const size_t buf = (size_t)mps * USBIF_UAC_PKTS_PER_XFER;
     for (int i = 0; i < USBIF_UAC_NUM_XFER; i++) {
-        if (usb_host_transfer_alloc(buf, USBIF_UAC_PKTS_PER_XFER, &usbif_uach.xfer[i]) != ESP_OK) {
+        if (usb_host_transfer_alloc(buf, USBIF_UAC_PKTS_PER_XFER, &s->xfer[i]) != ESP_OK) {
             for (int j = 0; j < i; j++) {
-                usb_host_transfer_free(usbif_uach.xfer[j]);
-                usbif_uach.xfer[j] = NULL;
+                usb_host_transfer_free(s->xfer[j]);
+                s->xfer[j] = NULL;
             }
             usb_host_interface_release(usbif_host_client_get(), dev, itf);
-            usbif_uac_ring_release();
+            usbif_uac_ring_release(s);
             return -6;
         }
-        usbif_uach.xfer[i]->callback = usbif_uac_cb;
+        s->xfer[i]->callback = usbif_uac_cb;
+        s->xfer[i]->context = s;
     }
 
-    usbif_uach.open = true;
-    if (!usbif_uach.is_in) {
+    s->open = true;
+    if (!s->is_in) {
         usbif_uac_sink_setup();
         usbif_pcm_sink_open(&usbif_uac_sink, frame);
     }
-    printf("usbif_uac: claimed itf %u alt %u ep 0x%02x mps %u rate %u ring %u (%s)\n",
+    printf("usbif_uac: claimed itf %u alt %u ep 0x%02x mps %u rate %u ring %u (%s)%s\n",
         (unsigned)itf, (unsigned)alt, (unsigned)ep, (unsigned)mps, (unsigned)rate,
         (unsigned)ring_bytes,
-        esp_ptr_external_ram(usbif_uach.ring_mem) ? "psram" : "internal");
+        esp_ptr_external_ram(s->ring_mem) ? "psram" : "internal",
+        other->open ? ", beside the other direction" : "");
     for (int i = 0; i < USBIF_UAC_NUM_XFER; i++) {
-        usbif_uac_prepare(usbif_uach.xfer[i]);
-        esp_err_t serr = usb_host_transfer_submit(usbif_uach.xfer[i]);
+        usbif_uac_prepare(s, s->xfer[i]);
+        esp_err_t serr = usb_host_transfer_submit(s->xfer[i]);
         printf("usbif_uac: submit[%d] num_bytes=%d pkts=%d -> 0x%x\n",
-            i, (int)usbif_uach.xfer[i]->num_bytes,
-            (int)usbif_uach.xfer[i]->num_isoc_packets, (unsigned)serr);
+            i, (int)s->xfer[i]->num_bytes,
+            (int)s->xfer[i]->num_isoc_packets, (unsigned)serr);
         if (serr == ESP_OK) {
-            usbif_uach.inflight++;
+            s->inflight++;
         } else {
-            usbif_uach.errors++;
+            s->errors++;
         }
     }
-    if (usbif_uach.inflight == 0) {
-        usbif_uach.open = false;
-        if (usbif_uac_sink_ready) {
+    if (s->inflight == 0) {
+        s->open = false;
+        if (!s->is_in && usbif_uac_sink_ready) {
             usbif_pcm_sink_close(&usbif_uac_sink);
         }
         for (int i = 0; i < USBIF_UAC_NUM_XFER; i++) {
-            usb_host_transfer_free(usbif_uach.xfer[i]);
-            usbif_uach.xfer[i] = NULL;
+            usb_host_transfer_free(s->xfer[i]);
+            s->xfer[i] = NULL;
         }
         usb_host_interface_release(usbif_host_client_get(), dev, itf);
-        usbif_uac_ring_release();
+        usbif_uac_ring_release(s);
         return -7;
     }
     return 0;
@@ -677,15 +704,30 @@ int usbif_host_uac_open(uint32_t dev_id, uint8_t itf, uint8_t alt, uint8_t ep,
     return r;
 }
 
+// Which stream a query means. `dir` is USBIF_HOST_UAC_OUT or _IN, or
+// USBIF_HOST_UAC_ANY for the calls that predate two streams: then the one
+// that is open, playback first when both are. NULL when that is none.
+static usbif_uac_host_t *usbif_uac_pick(int dir) {
+    if (dir == USBIF_HOST_UAC_OUT || dir == USBIF_HOST_UAC_IN) {
+        usbif_uac_host_t *s = &usbif_uach[dir == USBIF_HOST_UAC_IN ? USBIF_UAC_IN : USBIF_UAC_OUT];
+        return s->open ? s : NULL;
+    }
+    if (usbif_uach[USBIF_UAC_OUT].open) {
+        return &usbif_uach[USBIF_UAC_OUT];
+    }
+    return usbif_uach[USBIF_UAC_IN].open ? &usbif_uach[USBIF_UAC_IN] : NULL;
+}
+
 int usbif_host_uac_read(uint8_t *out, size_t max) {
-    if (!usbif_uach.open || !usbif_uach.is_in) {
+    usbif_uac_host_t *s = &usbif_uach[USBIF_UAC_IN];
+    if (!s->open) {
         return -1;
     }
-    return (int)usbif_uac_ring_pop(out, (uint32_t)max);
+    return (int)usbif_uac_ring_pop(s, out, (uint32_t)max);
 }
 
 int usbif_host_uac_write(const uint8_t *data, size_t len) {
-    if (!usbif_uach.open || usbif_uach.is_in) {
+    if (!usbif_uach[USBIF_UAC_OUT].open) {
         return -1;
     }
     // Through the gate, like a C sink's writes: a usermod's task may be
@@ -712,8 +754,9 @@ static int usbif_uac_c_space(void *ctx) {
 // the caller (Python chose the format and knows them); rate and frame size
 // are the driver's own. 0, or -1 when no playback stream is open.
 int usbif_host_uac_c_sink(pcm_c_sink_t *out, uint32_t channels, uint32_t bits) {
+    const usbif_uac_host_t *s = &usbif_uach[USBIF_UAC_OUT];
     uint32_t gen = usbif_uac_sink_ready ? usbif_pcm_sink_current(&usbif_uac_sink) : 0;
-    if (!usbif_uach.open || usbif_uach.is_in || gen == 0) {
+    if (!s->open || gen == 0) {
         return -1;
     }
     memset(out, 0, sizeof(*out));
@@ -722,91 +765,130 @@ int usbif_host_uac_c_sink(pcm_c_sink_t *out, uint32_t channels, uint32_t bits) {
     out->ctx = (void *)(uintptr_t)gen;
     out->write = usbif_uac_c_write;
     out->space = usbif_uac_c_space;
-    out->rate = usbif_uach.rate;
+    out->rate = s->rate;
     out->channels = channels;
     out->bits = bits;
-    out->frame_bytes = usbif_uach.frame;
+    out->frame_bytes = s->frame;
     return 0;
 }
 
-int usbif_host_uac_queued(void) {
-    return usbif_uach.open ? (int)usbif_uac_ring_used() : -1;
+int usbif_host_uac_queued(int dir) {
+    usbif_uac_host_t *s = usbif_uac_pick(dir);
+    return s ? (int)usbif_uac_ring_used(s) : -1;
 }
 
-// Room for a write that will not be short, in bytes; -1 when closed.
-int usbif_host_uac_space(void) {
-    if (usbif_uach.open && !usbif_uach.is_in) {
+// Room for a write that will not be short, in bytes; -1 when closed. For a
+// capture stream, the room left before the ring drops packets.
+int usbif_host_uac_space(int dir) {
+    usbif_uac_host_t *s = usbif_uac_pick(dir);
+    if (s == NULL) {
+        return -1;
+    }
+    if (!s->is_in) {
         return usbif_pcm_sink_space(&usbif_uac_sink, usbif_pcm_sink_current(&usbif_uac_sink));
     }
-    return usbif_uach.open ? (int)usbif_uac_ring_free() : -1;
+    return (int)usbif_uac_ring_free(s);
 }
 
 // The ring's size in bytes, as opened; -1 when closed.
-int usbif_host_uac_capacity(void) {
-    return usbif_uach.open ? (int)usbif_uach.ring.size : -1;
+int usbif_host_uac_capacity(int dir) {
+    usbif_uac_host_t *s = usbif_uac_pick(dir);
+    return s ? (int)s->ring.size : -1;
 }
 
-void usbif_host_uac_stats(uint32_t *packets, uint32_t *bytes, uint32_t *dropped,
+// The counters of a stream. They outlive its close, so a caller can read
+// how a run went after stopping it; a direction never opened reads zeros.
+// USBIF_HOST_UAC_ANY reads the open stream, or the playback one when
+// neither is.
+void usbif_host_uac_stats(int dir, uint32_t *packets, uint32_t *bytes, uint32_t *dropped,
     uint32_t *starved, uint32_t *errors, uint32_t *empty) {
-    *packets = usbif_uach.packets;
-    *bytes = usbif_uach.bytes;
-    *dropped = usbif_uach.dropped;
-    *starved = usbif_uach.starved;
-    *errors = usbif_uach.errors;
-    *empty = usbif_uach.empty;
+    const usbif_uac_host_t *s = usbif_uac_pick(dir);
+    if (s == NULL) {
+        s = &usbif_uach[dir == USBIF_HOST_UAC_IN ? USBIF_UAC_IN : USBIF_UAC_OUT];
+        if (dir == USBIF_HOST_UAC_ANY && !s->packets && usbif_uach[USBIF_UAC_IN].packets) {
+            s = &usbif_uach[USBIF_UAC_IN];
+        }
+    }
+    *packets = s->packets;
+    *bytes = s->bytes;
+    *dropped = s->dropped;
+    *starved = s->starved;
+    *errors = s->errors;
+    *empty = s->empty;
 }
 
-static void usbif_host_uac_close_locked(void) {
-    if (!usbif_uach.open) {
+// `tell_device`: send SET_INTERFACE alt 0 before releasing. Not from
+// host_stop()'s teardown, where the host task that delivers control
+// completions has already exited and the request could only time out.
+static void usbif_host_uac_close_locked(usbif_uac_host_t *s, bool tell_device) {
+    if (!s->open) {
         return;
     }
-    usbif_uach.open = false;
+    s->open = false;
     // Let the in-flight transfers retire before their buffers go away: an
     // isochronous transfer is scheduled bus time, and freeing underneath one
     // is how a host stack gets corrupted rather than merely stopped.
     // Suspended for the same reason as the control wait: `inflight` only
     // falls when the host task delivers the completion callbacks, and this
-    // lock is what keeps it out.
+    // lock is what keeps it out. The other direction's stream, if any, keeps
+    // running throughout: its transfers and ring are its own.
     int drain_held = usbif_host_lock_suspend();
     // First the producers: a usermod's task may be inside a write right now,
     // on the other core. This marks the sink closed and waits it out, so
     // from here on nothing but the transfer callbacks can reach the ring
     // (usbif#43, and the guarantee in shared/usbif_pcm_sink.h).
-    if (usbif_uac_sink_ready) {
+    if (!s->is_in && usbif_uac_sink_ready) {
         usbif_pcm_sink_close(&usbif_uac_sink);
     }
     const TickType_t drain_limit = USBIF_DELAY_TICKS(200);
-    for (TickType_t i = 0; i < drain_limit && usbif_uach.inflight; i++) {
+    for (TickType_t i = 0; i < drain_limit && s->inflight; i++) {
         vTaskDelay(1);
     }
     usbif_host_lock_resume(drain_held);
     for (int i = 0; i < USBIF_UAC_NUM_XFER; i++) {
-        if (usbif_uach.xfer[i]) {
-            usb_host_transfer_free(usbif_uach.xfer[i]);
-            usbif_uach.xfer[i] = NULL;
+        if (s->xfer[i]) {
+            usb_host_transfer_free(s->xfer[i]);
+            s->xfer[i] = NULL;
         }
     }
-    // Drop back to alt 0: the device stops reserving isochronous bandwidth,
-    // which matters on a full-speed bus where that reservation is the scarce
-    // resource every other device is competing for.
-    usb_host_interface_release(usbif_host_client_get(), usbif_uach.dev, usbif_uach.itf);
+    // Drop back to alt 0: the device stops streaming and stops reserving
+    // isochronous bandwidth, which matters on a full-speed bus where that
+    // reservation is the scarce resource every other device is competing
+    // for. Releasing the interface does not do this -- IDF sends no
+    // SET_INTERFACE at all, as the note on usbif_uac_set_interface() says --
+    // so without it a closed stream left the device on its streaming
+    // setting, and the next open's SET_INTERFACE was no change to it.
+    if (tell_device) {
+        usbif_uac_set_interface(s, s->itf, 0);
+    }
+    usb_host_interface_release(usbif_host_client_get(), s->dev, s->itf);
     // Only once the transfers have retired: a callback still in flight pops
     // from this storage. One that outlived the drain above returns early on
     // `open` and never reaches the ring.
-    usbif_uac_ring_release();
+    usbif_uac_ring_release(s);
 }
 
-void usbif_host_uac_close(void) {
+static void usbif_host_uac_close_dir(int dir, bool tell_device) {
     usbif_host_lock();
-    usbif_host_uac_close_locked();
+    if (dir != USBIF_HOST_UAC_IN) {
+        usbif_host_uac_close_locked(&usbif_uach[USBIF_UAC_OUT], tell_device);
+    }
+    if (dir != USBIF_HOST_UAC_OUT) {
+        usbif_host_uac_close_locked(&usbif_uach[USBIF_UAC_IN], tell_device);
+    }
     usbif_host_unlock();
+}
+
+// Close one direction's stream, or both with USBIF_HOST_UAC_ANY.
+void usbif_host_uac_close(int dir) {
+    usbif_host_uac_close_dir(dir, true);
 }
 
 // Called from host_stop()'s teardown, with the event pump explicit because
 // the host task's own loop has already exited by then -- the same reason the
 // other class drivers have a _for_host_stop variant.
 void usbif_host_uac_close_for_host_stop(void) {
-    usbif_host_uac_close();
+    usbif_host_uac_close_dir(USBIF_HOST_UAC_ANY, false);
     for (int i = 0; i < 10; i++) {
         usb_host_client_handle_events(usbif_host_client_get(), pdMS_TO_TICKS(10));
     }
