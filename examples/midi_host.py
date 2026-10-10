@@ -18,12 +18,22 @@ an M-Audio interface: all eight sent messages returned byte-exact, median
 5 ms round trip. Nobody upstream ships an IDF MIDI host driver, so this one
 is ours (`src/usbif_host_midi.c`); the numbers above are why the status line
 no longer says "compile-verified only".
+
+**Behind a hub on an ESP32-P4,** set ``FULL_SPEED = True`` below. A
+keyboard is a full-speed device, and the P4's high-speed port can't reach one
+through a hub without a transaction translator, which the ESP-IDF host lacks.
+At full speed the hub passes it straight through.
 """
 
 import time
 
 import usbif
 import usbif.auto
+
+# True when the device is behind a hub on an ESP32-P4: the host then runs at
+# full speed, so the hub passes a full-speed device through. Plugged straight
+# into the port, or on an S3, leave it False.
+FULL_SPEED = False
 
 # Two-note chord sent to the device, to prove the OUT pipe. Middle C and the
 # fifth above it, loud enough to hear on a sound module.
@@ -50,7 +60,7 @@ def describe(status, d1, d2):
 
 
 def main():
-    host = usbif.auto.host(classes=("midi",)).start()
+    host = usbif.auto.host(classes=("midi",), full_speed=FULL_SPEED).start()
     print("started ->", tuple(sorted(host.started)))
 
     dev = None

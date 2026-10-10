@@ -51,6 +51,9 @@
 #include "esp_intr_alloc.h"
 #include "esp_cpu.h"
 #include "usb/usb_host.h"
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+#include "hal/usb_dwc_ll.h"
+#endif
 
 #include "shared/usbif_ringbuf.h"
 #include "usbif_classes.h"
@@ -346,6 +349,37 @@ void usbif_host_set_class_filter(uint16_t mask) {
     usbif_host_class_filter = mask;
 }
 
+// host_start(full_speed=True): run the root port at full speed (usbif#15).
+// IDF's host has no transaction translator, so on a high-speed root port a
+// full- or low-speed device behind a hub is refused ("transaction translator
+// (TT) is not supported"). Holding the controller to full speed makes a hub
+// run its upstream port at full speed too, where it repeats full- and
+// low-speed traffic and needs no split transactions. High-speed devices then
+// run at full speed. Only the P4's high-speed controller has the choice; on
+// the S2 and S3 the controller is full speed already and this is a no-op.
+// Set by mod_usbif.c's host_start() before usbif_host_start_c(), like the
+// class filter above.
+static bool usbif_host_full_speed = false;
+
+void usbif_host_set_full_speed(bool full_speed) {
+    usbif_host_full_speed = full_speed;
+}
+
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+// HCFG.FSLSSupp holds the core to full and low speed. It is read when the
+// port resets a newly attached device, so it has to be set before the root
+// port is powered: the install below leaves the port off, this runs, and
+// only then does the port get power. A root-port recovery (after the device
+// on it detaches) soft-resets the core, so the task loop calls this again
+// after every library pump. It writes nothing when the bit is already set.
+static void usbif_host_hold_full_speed(void) {
+    usb_dwc_dev_t *hw = USB_DWC_LL_GET_HW(0);
+    if (!hw->hcfg_reg.fslssupp) {
+        usb_dwc_ll_hcfg_set_fsls_supp_only(hw);
+    }
+}
+#endif
+
 // Diagnostic counters, same philosophy as the UAC ones: the first question
 // when nothing attaches is whether anything happened at all.
 uint32_t usbif_host_attaches, usbif_host_detaches, usbif_host_errors;
@@ -619,6 +653,10 @@ static void usbif_host_task(void *arg) {
         #endif
     };
     usbif_host_fifo_for(usbif_host_class_filter, &config);
+    #if defined(CONFIG_IDF_TARGET_ESP32P4)
+    const bool full_speed = usbif_host_full_speed;
+    config.root_port_unpowered = full_speed;
+    #endif
     esp_err_t err = usb_host_install(&config);
     printf("usbif_host: install -> 0x%x\n", (unsigned)err);
     if (err == ESP_OK) {
@@ -636,6 +674,17 @@ static void usbif_host_task(void *arg) {
             usb_host_uninstall();
         }
     }
+    #if defined(CONFIG_IDF_TARGET_ESP32P4)
+    if (err == ESP_OK && full_speed) {
+        usbif_host_hold_full_speed();
+        err = usb_host_lib_set_root_port_power(true);
+        printf("usbif_host: full-speed root port, power -> 0x%x\n", (unsigned)err);
+        if (err != ESP_OK) {
+            usb_host_client_deregister(usbif_host_client);
+            usb_host_uninstall();
+        }
+    }
+    #endif
     usbif_host_install_result = (int)err;
     if (err != ESP_OK) {
         usbif_host_task_handle = NULL;
@@ -665,6 +714,11 @@ static void usbif_host_task(void *arg) {
         usbif_host_lock();
         usbif_host_stage = 2;
         usb_host_lib_handle_events(0, &flags);
+        #if defined(CONFIG_IDF_TARGET_ESP32P4)
+        if (full_speed) {
+            usbif_host_hold_full_speed();
+        }
+        #endif
         usbif_host_stage = 3;
         usb_host_client_handle_events(usbif_host_client, 0);
         usbif_host_stage = 4;

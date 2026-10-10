@@ -302,11 +302,6 @@ static void usbif_midih_quiesce(void) {
 uint8_t usbif_host_midi_release_failed;
 
 static void usbif_midih_release(void) {
-    usb_host_transfer_free(usbif_midih.xfer_in);
-    usb_host_transfer_free(usbif_midih.xfer_out);
-    usbif_midih.xfer_in = NULL;
-    usbif_midih.xfer_out = NULL;
-
     // Retry, because the release can legitimately be early rather than
     // wrong. interface_release() refuses while any endpoint still has an
     // in-flight URB, and the URBs that halt/flush just cancelled are only
@@ -332,6 +327,22 @@ static void usbif_midih_release(void) {
         usbif_host_lock_resume(held);
     }
     usbif_host_midi_release_failed = (err == ESP_OK) ? 0 : 1;
+
+    // Free the transfers only now. A halted and flushed transfer stays queued
+    // in the library until the client pump retires it, and the pump writes to
+    // it and calls its callback as it does; interface_release() succeeding is
+    // the library saying none is left. Freeing them first, as this did, was a
+    // use-after-free: the pump wrote into freed heap, and a later free (a
+    // pipe's, at host_stop()) panicked in the allocator. On an ESP32-P4 it
+    // panicked on the first host session after every boot. If the release
+    // never succeeds, the transfers may still be queued, so they are leaked
+    // rather than freed under the library.
+    if (err == ESP_OK) {
+        usb_host_transfer_free(usbif_midih.xfer_in);
+        usb_host_transfer_free(usbif_midih.xfer_out);
+    }
+    usbif_midih.xfer_in = NULL;
+    usbif_midih.xfer_out = NULL;
 }
 
 static void usbif_host_midi_close_locked(void) {
