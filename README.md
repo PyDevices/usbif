@@ -189,6 +189,10 @@ now raises `OSError` instead of silently pretending to keep working
 either way. Teardown's waits are bounded in milliseconds rather than ticks,
 so a board built with a 1000 Hz FreeRTOS tick stops as cleanly as one at
 100 Hz ([#29](https://github.com/PyDevices/usbif/issues/29)).
+A device that stops answering a control request no longer leaves the host
+half-installed: `host_stop()` powers the root port off to retire the
+request the class driver gave up on, and the next `host_start()` works
+([#73](https://github.com/PyDevices/usbif/issues/73)).
 `host_start()`'s class filter **is** now honoured -- verified both
 in the intersection arithmetic and against a live device (excluded from a
 class tuple, it is invisible to `host_devices()`; included, it attaches) --
