@@ -9,8 +9,9 @@ Capabilities are discovered, never assumed -- an empty set is a valid answer.
 
 Plug and unplug devices while it runs; each attach and detach is printed.
 On an S3 host that means a powered hub or OTG adapter (no VBUS switching on
-the Waveshare touch boards). A P4 hosts on a port that supplies 5 V, and
-behind a hub it sees only high-speed devices (usbif#15).
+the Waveshare touch boards). A P4 hosts on a port that supplies 5 V. Behind a
+hub it sees full- and low-speed devices only when the host runs at full speed:
+pass ``full_speed=True`` to ``auto.host()``, or run this with ``--full-speed``.
 """
 
 import sys
@@ -21,8 +22,8 @@ import usbif
 from usbif import auto
 
 
-def main(seconds=60):
-    host = auto.host()
+def main(seconds=60, full_speed=False):
+    host = auto.host(full_speed=True) if full_speed else auto.host()
     caps = host.capabilities()
     print("backend capabilities:", sorted(caps) if caps else "(none)")
     host.start()
@@ -59,5 +60,6 @@ def main(seconds=60):
 
 
 if __name__ == "__main__":
-    secs = int(sys.argv[1]) if len(sys.argv) > 1 else 60
-    main(secs)
+    args = [a for a in sys.argv[1:] if a != "--full-speed"]
+    secs = int(args[0]) if args else 60
+    main(secs, full_speed="--full-speed" in sys.argv[1:])

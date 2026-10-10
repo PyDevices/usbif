@@ -69,6 +69,7 @@ extern uint32_t usbif_host_attaches, usbif_host_detaches, usbif_host_errors;
 extern int usbif_host_lib_counts(int *num_devices, int *num_clients);
 extern int usbif_host_port_cycle(void);
 extern void usbif_host_set_class_filter(uint16_t mask);
+extern void usbif_host_set_full_speed(bool full_speed);
 extern void usbif_host_intr_dump(void);
 extern int usbif_cdc_open(uint32_t dev_id);
 extern int usbif_cdc_write(const uint8_t *data, size_t len);
@@ -229,7 +230,19 @@ static mp_obj_t usbif_device_row(const usbif_event_t *event) {
     return mp_obj_new_tuple(7, items);
 }
 
-static mp_obj_t usbif_host_start(mp_obj_t classes_in) {
+// host_start(classes, *, full_speed=False). full_speed holds the root port
+// to full speed, so full- and low-speed devices work behind a hub on the
+// P4's high-speed host (usbif#15); see usbif_host_set_full_speed(). Like the
+// class filter, it takes effect when the host starts, not on a running host.
+static mp_obj_t usbif_host_start(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum { ARG_classes, ARG_full_speed };
+    static const mp_arg_t allowed[] = {
+        { MP_QSTR_classes, MP_ARG_REQUIRED | MP_ARG_OBJ, { .u_obj = mp_const_none } },
+        { MP_QSTR_full_speed, MP_ARG_KW_ONLY | MP_ARG_BOOL, { .u_bool = false } },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
+    mp_obj_t classes_in = args[ARG_classes].u_obj;
     // Intersected against what this firmware can actually drive: a caller
     // naming an unbuilt or unknown class doesn't start it, matching the
     // return value ("the set actually started") that native_usb.py documents.
@@ -241,6 +254,9 @@ static mp_obj_t usbif_host_start(mp_obj_t classes_in) {
         usbif_rb_init(&usbif_events, usbif_event_slots, USBIF_EVENT_CAPACITY);
     }
     #if USBIF_HAVE_HOST
+    if (!usbif_host_running) {
+        usbif_host_set_full_speed(args[ARG_full_speed].u_bool);
+    }
     usbif_host_set_class_filter(wanted);
     int err = usbif_host_start_c();
     if (err != 0) {
@@ -256,7 +272,7 @@ static mp_obj_t usbif_host_start(mp_obj_t classes_in) {
     usbif_host_running = true;
     return usbif_classes_to_set(wanted);
 }
-static MP_DEFINE_CONST_FUN_OBJ_1(usbif_host_start_obj, usbif_host_start);
+static MP_DEFINE_CONST_FUN_OBJ_KW(usbif_host_start_obj, 1, usbif_host_start);
 
 static mp_obj_t usbif_host_stop(void) {
     #if USBIF_HAVE_HOST
