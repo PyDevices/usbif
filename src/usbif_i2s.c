@@ -43,6 +43,8 @@
 
 #include "py/runtime.h"
 
+#include "shared/usbif_pump_block.h"
+
 // The spectrum meter is audiodsp's audiometer now. It is found by a weak
 // symbol, so a firmware with usbif and no audiodsp builds and pumps as before.
 extern void audiometer_uac_feed(const int16_t *frames, uint32_t n, uint32_t channels, uint32_t rate)
@@ -384,62 +386,14 @@ static void usbif_pump_task(void *arg) {
             memcpy(carry, block + usable, carry_len);
         }
 
-        // audiometer (audiodsp) looks at the host's frames before they are
-        // mixed down and scaled for the wire, when a Meter is attached to
-        // audiometer.UAC. With none attached it costs a call and a load.
-        if (audiometer_uac_feed) {
-            audiometer_uac_feed((const int16_t *)(void *)block, usable / frame_bytes,
-                usbif_src_channels, host_rate);
-        }
-
-        uint16_t out_bytes = usable;
         // Host volume and mute, as one Q16 multiplier maintained by the
         // control layer. Fetched once per block: a slider move lands on the
-        // next block, which at these block sizes is inaudibly soon. Unity
-        // skips the loop entirely when no conversion is needed either.
-        const uint32_t gain = usbif_uac_gain();
-        const bool passthrough = (usbif_src_channels == usbif_sink_channels)
-            && (usbif_decimate == 1) && (gain == 65536u);
-        if (!passthrough) {
-            const int16_t *in = (const int16_t *)(void *)block;
-            int16_t *out = (int16_t *)(void *)block;
-            const uint16_t frames = usable / frame_bytes;
-            uint16_t kept = 0;
-            // In-place is safe here because the write index never overtakes
-            // the read index: stereo-to-stereo at decimate 1 writes exactly
-            // where it read, and downmixing produces fewer samples than it
-            // consumes. EXPANDING a mono source onto a stereo wire would NOT
-            // be safe in place -- it emits two samples per frame consumed --
-            // which is why pump_start rejects that combination outright
-            // rather than leaving a trap here for whoever makes the USB
-            // descriptor configurable.
-            for (uint16_t f = 0; f < frames; f += usbif_decimate) {
-                if (usbif_src_channels == 2 && usbif_sink_channels == 2) {
-                    // Stereo through to a stereo sink: keep both sides. The
-                    // old code averaged here regardless of the sink and fed
-                    // half the samples the hardware was clocking for.
-                    int32_t l = (int32_t)(((int64_t)in[f * 2] * gain) >> 16);
-                    int32_t r = (int32_t)(((int64_t)in[f * 2 + 1] * gain) >> 16);
-                    out[kept++] = (int16_t)l;
-                    out[kept++] = (int16_t)r;
-                    continue;
-                }
-                int32_t sample;
-                if (usbif_src_channels == 2) {
-                    // Average rather than take one side: a mono sink fed only
-                    // the left channel loses anything panned right, which on
-                    // real music is most of it.
-                    sample = ((int32_t)in[f * 2] + (int32_t)in[f * 2 + 1]) / 2;
-                } else {
-                    sample = in[f];
-                }
-                // Gain is <= unity (the advertised range tops out at 0 dB),
-                // so the product cannot exceed int16 and needs no clamp.
-                sample = (int32_t)(((int64_t)sample * gain) >> 16);
-                out[kept++] = (int16_t)sample;
-            }
-            out_bytes = (uint16_t)(kept * 2);
-        }
+        // next block, which at these block sizes is inaudibly soon. The
+        // spectrum meter (audiodsp's audiometer.UAC) sees the shaped block,
+        // so it follows the host's volume and mute on every host.
+        const uint16_t out_bytes = usbif_pump_shape_block(block, usable,
+            usbif_src_channels, usbif_sink_channels, usbif_decimate,
+            usbif_uac_gain(), host_rate, audiometer_uac_feed);
         if (out_bytes == 0) {
             continue;
         }
