@@ -58,7 +58,7 @@ wedged board.
 |---|---|---|
 | Device UAC is speaker-only (no mic endpoint) | [usbif#7](https://github.com/PyDevices/usbif/issues/7) | `usb_mic.py` hosts a commercial mic; no device-side capture script |
 | P4 behind a hub reaches full-speed devices only at full speed | [usbif#15](https://github.com/PyDevices/usbif/issues/15) | A keyboard or MIDI controller behind a hub needs `host(..., full_speed=True)`; plugged straight into the port it needs nothing |
-| Host FIFO split is per session | [usbif#2](https://github.com/PyDevices/usbif/issues/2) | `host(classes=...)` decides it: `uvc` leans IN (600 B), `uac` without `uvc` gives periodic OUT 200 B and IN 528 B; a camera and a 2.0 speaker cannot share one `start()` |
+| Host FIFO split is per session | [usbif#2](https://github.com/PyDevices/usbif/issues/2) | `host(classes=...)` decides it: `uvc` leans IN (600 B), `uac` without `uvc` gives periodic OUT 200 B and IN 528 B on an S3, four times that on a P4 (800 B and 2136 B); a camera and a 2.0 speaker cannot share one `start()` |
 
 ## Conventions
 

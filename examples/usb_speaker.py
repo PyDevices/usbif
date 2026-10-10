@@ -16,8 +16,10 @@ can back-feed unless the cable omits VBUS; see ``examples/README.md``.
 **FIFO split.** Hosted playback competes with hosted video for DWC FIFO
 space, and the split is fixed when the host starts (usbif#2). The host picks
 it from the classes it is started for: this script asks for ``uac`` alone,
-which gives periodic OUT 200 bytes, enough for 48 kHz stereo from a USB
-Audio 2.0 device (196). A session that also asks for ``uvc`` leans IN and
+which gives periodic OUT 200 bytes on an S3, enough for 48 kHz stereo from a
+USB Audio 2.0 device (196), and 800 on a P4, enough for a USB-C DAC whose
+endpoint declares 384. The host prints the split and those limits as it
+starts. A session that also asks for ``uvc`` leans IN and
 cannot open such a stream.
 """
 

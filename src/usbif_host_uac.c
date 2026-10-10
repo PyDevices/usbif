@@ -67,7 +67,14 @@ extern bool usbif_host_ctrl_reclaim(usb_transfer_t *xfer);
 // the stream gapping, and small enough that stopping is prompt.
 #define USBIF_UAC_PKTS_PER_XFER (8)
 #define USBIF_UAC_NUM_XFER      (3)
-#define USBIF_UAC_MAX_MPS       (256)
+// The largest packet an isochronous endpoint may declare: 1023 bytes at full
+// speed, 1024 per transaction at high speed. This used to be 256, which
+// refused a cheap USB-C DAC whose OUT endpoint declares 384 bytes before the
+// host was ever asked. The real limit is the controller's FIFO split
+// (usbif_host.c), and IDF enforces it at the interface claim; this bound only
+// guards the transfer buffers, which are sized from the stream's own packet
+// (mps x USBIF_UAC_PKTS_PER_XFER), never from this.
+#define USBIF_UAC_MAX_MPS       (1024)
 // The ring between Python and the bus. Its size is the caller's (usbif#36):
 // the default is the 8 KB this driver always had, 43 ms of 48 kHz stereo,
 // which an interpreter busy with a UI redraw or a Web API call outlasts. A
