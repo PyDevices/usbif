@@ -8,8 +8,8 @@ the client pump retires it, and the pump writes to it as it does.
 ``usb_host_interface_release()`` succeeding is the library's signal that none
 is left in flight, so a driver's release function must call it before any
 ``usb_host_transfer_free()``. The MIDI host freed first and panicked in the
-allocator at ``host_stop()`` (usbif#74); the HID host had the same order
-(usbif#75). This reads each driver's release function and checks the order.
+allocator at ``host_stop()`` (usbif#74); the HID and CDC hosts had the same
+order (usbif#75). This reads each driver's release function and checks the order.
 """
 
 import pathlib
@@ -20,6 +20,7 @@ SRC = pathlib.Path(__file__).resolve().parents[1] / "src"
 
 # The function in each driver that releases the interface on close().
 RELEASES = {
+    "usbif_host_cdc.c": "usbif_cdc_release",
     "usbif_host_hid.c": "usbif_hid_release",
     "usbif_host_midi.c": "usbif_midih_release",
 }
