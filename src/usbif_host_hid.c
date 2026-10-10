@@ -200,8 +200,6 @@ uint8_t usbif_hid_release_failed;
 // one usually calling close(), so releasing immediately loses a race it
 // never needed to enter.
 static void usbif_hid_release(void) {
-    usb_host_transfer_free(usbif_hid.xfer_in);
-    usbif_hid.xfer_in = NULL;
     esp_err_t err = ESP_FAIL;
     // About 250 ms at any tick rate (usbif_ticks.h).
     const TickType_t release_limit = USBIF_MS_TICKS(250);
@@ -216,6 +214,18 @@ static void usbif_hid_release(void) {
         usbif_host_lock_resume(held);
     }
     usbif_hid_release_failed = (err == ESP_OK) ? 0 : 1;
+
+    // Free the transfer only now. A halted and flushed transfer stays queued
+    // in the library until the client pump retires it, and the pump writes to
+    // it and calls its callback as it does; interface_release() succeeding is
+    // the library saying none is left. Freeing it first was a use-after-free,
+    // the same one the MIDI host had (usbif#74). If the release never
+    // succeeds, the transfer may still be queued, so it is leaked rather than
+    // freed under the library.
+    if (err == ESP_OK) {
+        usb_host_transfer_free(usbif_hid.xfer_in);
+    }
+    usbif_hid.xfer_in = NULL;
 }
 
 static void usbif_hid_close_locked(void) {
