@@ -185,9 +185,9 @@ def main():
         return
     dev = usbif.auto.device()
     if dev.uac_pump_stats()[0]:
-        # A soft reset leaves the C pump running (its buffers aren't on the
-        # Python heap), with nothing in Python left to stop it, and holding
-        # I2S: uac_pump_start() would fail. Stop it, then start afresh.
+        # Firmware from before usbif stopped its pump on a soft reset left it
+        # running, with nothing in Python left to stop it, and holding I2S:
+        # uac_pump_start() would fail. Stop it, then start afresh.
         dev.uac_pump_stop()
         print("stopped the pump left running by a soft reset")
     _spectrum()  # before the card, as the meter attaches to its pump

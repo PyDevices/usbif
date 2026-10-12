@@ -199,6 +199,12 @@ A device that stops answering a control request no longer leaves the host
 half-installed: `host_stop()` powers the root port off to retire the
 request the class driver gave up on, and the next `host_start()` works
 ([#73](https://github.com/PyDevices/usbif/issues/73)).
+A soft reset (Ctrl-D) stops what the program left running, as MicroPython's
+own `machine` peripherals do: the host and any stream open on it, the sound
+card's I2S pump, and an attached drive. The next program finds the host
+stopped and its devices attach again. `host_stop()` with a microphone or
+speaker stream still open no longer wedges the host.
+`tests/hardware/soft_reset_check.py` checks all of it on a board.
 `host_start()`'s class filter **is** now honoured -- verified both
 in the intersection arithmetic and against a live device (excluded from a
 class tuple, it is invisible to `host_devices()`; included, it attaches) --

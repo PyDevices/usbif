@@ -1101,10 +1101,30 @@ restore_device:
         ? -1 : usbif_host_install_result;
 }
 
+// The plain closes Python calls, for usbif_host_stop_c() below.
+extern void usbif_host_midi_close(void);
+extern void usbif_host_uac_close(int dir);
+extern void usbif_host_uvc_close(void);
+
 void usbif_host_stop_c(void) {
     if (usbif_host_task_handle == NULL) {
         return;
     }
+    // Close every class driver first, the way a program's own close() calls
+    // do, while the host task is still running and retiring their transfers.
+    // The task's teardown has _for_host_stop closes of its own, but by then
+    // its loop has exited, and an isochronous stream's in-flight transfers
+    // only retire when something pumps the client. A microphone stream left
+    // open across host_stop() kept them in flight: the client couldn't
+    // deregister, the root port power-off didn't release the device, and the
+    // host came back wedged until a hard reset. A soft reset reaches here
+    // with whatever the program had open, so this is the path that matters.
+    usbif_cdc_close();
+    usbif_hid_close();
+    usbif_host_midi_close();
+    usbif_msc_close();
+    usbif_host_uac_close(USBIF_HOST_UAC_ANY);
+    usbif_host_uvc_close();
     usbif_host_task_running = false;
     // Bounded in milliseconds, not ticks: see USBIF_HOST_STOP_WAIT_MS.
     const TickType_t stop_limit = USBIF_MS_TICKS(USBIF_HOST_STOP_WAIT_MS);

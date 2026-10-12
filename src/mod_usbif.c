@@ -135,6 +135,10 @@ static usbif_event_t usbif_event_slots[USBIF_EVENT_CAPACITY];
 static usbif_ringbuf_t usbif_events;
 static bool usbif_host_running = false;
 
+// Called by anything that starts hardware a soft reset must stop; see
+// "Soft reset" at the end of this file.
+static void usbif_arm_soft_reset(void);
+
 // Producer hook for the host engine (usbif_host.c). Called only from the
 // host task, preserving the ring's single-producer contract.
 void usbif_host_emit(const usbif_event_t *event) {
@@ -270,6 +274,7 @@ static mp_obj_t usbif_host_start(size_t n_args, const mp_obj_t *pos_args, mp_map
     }
     #endif
     usbif_host_running = true;
+    usbif_arm_soft_reset();
     return usbif_classes_to_set(wanted);
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW(usbif_host_start_obj, 1, usbif_host_start);
@@ -518,6 +523,7 @@ static mp_obj_t usbif_uac_pump_start(size_t n_args, const mp_obj_t *pos_args,
     if (err != 0) {
         mp_raise_OSError(err);
     }
+    usbif_arm_soft_reset();
     return mp_const_none;
     #else
     (void)n_args;
@@ -1627,6 +1633,7 @@ static mp_obj_t usbif_msc_attach_py(size_t n_args, const mp_obj_t *args) {
         mp_raise_ValueError(MP_ERROR_TEXT("buffer smaller than one 512-byte block"));
     }
     MP_STATE_VM(usbif_msc_obj) = args[0];
+    usbif_arm_soft_reset();
     return mp_const_none;
     #else
     (void)n_args;
@@ -1662,6 +1669,7 @@ static mp_obj_t usbif_msc_attach_blockdev_py(size_t n_args, const mp_obj_t *args
         mp_raise_ValueError(MP_ERROR_TEXT("MSC already attached; detach first"));
     }
     MP_STATE_VM(usbif_msc_obj) = args[0];
+    usbif_arm_soft_reset();
     return mp_const_none;
     #else
     (void)n_args;
@@ -1703,10 +1711,11 @@ static mp_obj_t usbif_msc_status(void) {
 static MP_DEFINE_CONST_FUN_OBJ_0(usbif_msc_status_obj, usbif_msc_status);
 
 // The buffer currently attached, or None. The VM root keeps it alive
-// across anything the application does with its own references -- including
-// a soft reset -- so this is how a board gets its drive back after the host
-// has finished writing to it, which is the whole point of the workflow:
-// attach, let the host write, wait for the eject, take it back and mount it.
+// across anything the application does with its own references, so this is
+// how a board gets its drive back after the host has finished writing to
+// it, which is the whole point of the workflow: attach, let the host write,
+// wait for the eject, take it back and mount it. A soft reset detaches it
+// (see "Soft reset" below): the buffer lived in the heap the reset wipes.
 static mp_obj_t usbif_msc_buffer(void) {
     #if defined(CFG_TUD_MSC) && CFG_TUD_MSC
     mp_obj_t o = MP_STATE_VM(usbif_msc_obj);
@@ -1845,11 +1854,12 @@ static MP_DEFINE_CONST_DICT(usbif_module_globals, usbif_module_globals_table);
 MP_REGISTER_ROOT_POINTER(mp_obj_t usbif_msc_obj);
 
 #if defined(CFG_TUD_MSC) && CFG_TUD_MSC
-// Consulted by usbif_msc_dev.c before every host access. A soft reset
-// clears the VM's root pointers, freeing the buffer while the USB task
-// still holds its address; without this the host would read reused memory
-// and see corrupted files rather than an error. The drive reports "no
-// medium" instead, which is both true and something hosts handle.
+// Consulted by usbif_msc_dev.c before every host access. The root is NULL
+// once the drive is detached, by msc_detach() or by a soft reset (which
+// frees the buffer: mp_init() does not clear root pointers, so the soft-reset
+// teardown below clears this one itself). Without the check the host would
+// read reused memory and see corrupted files rather than an error. The drive
+// reports "no medium" instead, which is both true and something hosts handle.
 bool usbif_msc_root_alive(void) {
     return MP_STATE_VM(usbif_msc_obj) != MP_OBJ_NULL;
 }
@@ -1862,6 +1872,84 @@ mp_obj_t usbif_msc_get_obj(void) {
     return MP_STATE_VM(usbif_msc_obj);
 }
 #endif
+
+// --- Soft reset -------------------------------------------------------------
+//
+// A soft reset wipes the Python heap and leaves C running. Before this, the
+// host task, the I2S pump and an attached drive all outlived the program that
+// started them: the next host_start() was a no-op on the old host and queued
+// no attach events, a stream the old program left open couldn't be opened
+// again, host_stop() then wedged the host until a hard reset, uac_pump_start()
+// refused because the old pump still held I2S, and the drive went on serving
+// a buffer out of a heap that had been reused.
+//
+// The esp32 port's soft-reset path calls a fixed list of deinit functions
+// that a user C module can't join, and MP_REGISTER_MODULE_DELEGATION is for
+// attribute lookup, not teardown. But the same path calls gc_sweep_all()
+// first, which runs __del__ on every object in the heap that has one,
+// reachable or not. That's how machine.I2S, machine.Timer and sockets shut
+// down on a soft reset, and it's what usbif uses: a small guard object with a
+// finaliser, held in a root pointer so an ordinary gc.collect() never
+// finalises it, made the first time a program starts something. Finalisers
+// run before the heap's blocks are freed, so the drive's buffer is still
+// intact while the drive detaches.
+//
+// The USB device functions (usbif_fn_set(), the sound card's costume) are
+// left as they are: changing them re-enumerates the board, and the REPL a
+// soft reset is typed into would go with it.
+
+static void usbif_soft_reset_teardown(void) {
+    #if USBIF_HAVE_HOST
+    // Closes whatever class drivers the program left open, then stops the
+    // host task and uninstalls the host library: host_start() starts fresh.
+    usbif_host_stop_c();
+    #endif
+    usbif_host_running = false;
+    #if defined(CFG_TUD_AUDIO) && CFG_TUD_AUDIO
+    // Stops the pump task and deletes its I2S channel, so uac_pump_start()
+    // and machine.I2S can have the peripheral again.
+    usbif_pump_stop();
+    #endif
+    #if defined(CFG_TUD_MSC) && CFG_TUD_MSC
+    extern void usbif_msc_detach(void);
+    usbif_msc_detach();
+    MP_STATE_VM(usbif_msc_obj) = MP_OBJ_NULL;
+    #endif
+    // The guard is being swept with the rest of the heap. Its root has to go
+    // too, or the next program's first start would find it still set and
+    // never make a live guard, leaving the soft reset after that with nothing
+    // to finalise.
+    MP_STATE_VM(usbif_soft_reset_guard) = MP_OBJ_NULL;
+}
+
+static mp_obj_t usbif_soft_reset_guard_del(mp_obj_t self_in) {
+    (void)self_in;
+    usbif_soft_reset_teardown();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(usbif_soft_reset_guard_del_obj, usbif_soft_reset_guard_del);
+
+static const mp_rom_map_elem_t usbif_soft_reset_guard_locals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR___del__), MP_ROM_PTR(&usbif_soft_reset_guard_del_obj) },
+};
+static MP_DEFINE_CONST_DICT(usbif_soft_reset_guard_locals, usbif_soft_reset_guard_locals_table);
+
+static MP_DEFINE_CONST_OBJ_TYPE(
+    usbif_soft_reset_guard_type,
+    MP_QSTR_SoftResetGuard,
+    MP_TYPE_FLAG_NONE,
+    locals_dict, &usbif_soft_reset_guard_locals
+    );
+
+MP_REGISTER_ROOT_POINTER(mp_obj_t usbif_soft_reset_guard);
+
+static void usbif_arm_soft_reset(void) {
+    if (MP_STATE_VM(usbif_soft_reset_guard) == MP_OBJ_NULL) {
+        mp_obj_base_t *guard = mp_obj_malloc_with_finaliser(mp_obj_base_t,
+            &usbif_soft_reset_guard_type);
+        MP_STATE_VM(usbif_soft_reset_guard) = MP_OBJ_FROM_PTR(guard);
+    }
+}
 
 const mp_obj_module_t usbif_user_cmodule = {
     .base = { &mp_type_module },

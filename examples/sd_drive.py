@@ -94,9 +94,8 @@ def card_geometry(card):
 def main():
     dev = usbif.auto.device()
 
-    # Anything a previous run left attached: the C side holds the object
-    # through a VM root, so it survives a soft reset and would otherwise
-    # refuse this attach.
+    # Anything a previous run left attached would refuse this attach. A soft
+    # reset detaches the drive on current firmware; older firmware kept it.
     dev.msc_detach()
 
     card = open_card()
