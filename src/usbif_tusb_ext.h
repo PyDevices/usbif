@@ -371,6 +371,11 @@
     TUSB_CLASS_AUDIO, AUDIO_SUBCLASS_MIDI_STREAMING, \
     AUDIO_FUNC_PROTOCOL_CODE_UNDEF, 0,
 
+// mp_usbd.h defaults this length to 0 when nothing has set it. A file that
+// includes mp_usbd.h before anything pulls in tusb_config.h (mp_usbd_cdc.c
+// during the qstr pass, where NO_QSTR keeps tusb.h out) sets that default
+// first, so ours replaces it rather than redefining it.
+#undef MICROPY_HW_USB_EXT_DESC_CFG_LEN
 #if USBIF_EXT_AUDIO
 #define MICROPY_HW_USB_EXT_DESC_CFG_LEN (USBIF_AUDIO_SPEAKER_STEREO_FB_DESC_LEN + USBIF_MIDI_IAD_LEN + TUD_MIDI_DESC_LEN + TUD_HID_DESC_LEN + USBIF_VIDEO_DESC_LEN)
 #else
