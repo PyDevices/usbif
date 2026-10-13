@@ -22,6 +22,8 @@ on the boards people actually use.
   packages on `machine.USBDevice`, with what MicroPython lacks added in the
   same style. Code written for usbif's current API will need changing.
 - Host mode follows, without losing anything usbif's host does today.
+- Keyboards, mice and other HID devices take CircuitPython's `adafruit_hid`
+  API, so the same keyboard code runs over USB and over BLE.
 
 ## Host and device together
 
