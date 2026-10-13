@@ -36,6 +36,7 @@ FAULTS = {
     -18: "an IN endpoint numbered past the controller's transmit FIFOs",
     -19: "an endpoint numbered past the controller's endpoints",
     -20: "endpoint address used twice",
+    -21: "a video streaming header names an endpoint its interface does not have",
 }
 
 

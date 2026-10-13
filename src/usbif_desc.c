@@ -70,6 +70,11 @@
 // The AudioStreaming interface subclass (USB Audio 2.0 A.2), spelled here so
 // the assembler does not depend on TinyUSB's audio class header being built in.
 #define USBIF_AUDIO_SUBCLASS_STREAMING (0x02)
+// The same for video (UVC 1.5 A.2 and A.6): the streaming subclass, and the
+// two class-specific headers that carry the streaming endpoint's address.
+#define USBIF_VIDEO_SUBCLASS_STREAMING (0x02)
+#define USBIF_VS_INPUT_HEADER (0x01)
+#define USBIF_VS_OUTPUT_HEADER (0x02)
 
 // Function identifiers, as a bitmask so Python can name a costume in one
 // integer. Values are API: they appear in usbif's Python surface.
@@ -276,6 +281,15 @@ static void usbif_fixup_block(uint8_t *p, uint16_t len, int itf_delta) {
 // the device never enumerates: usbif#24, every costume with CDC in it. MIDI
 // used to be the one class patched this way, by compile-time address.
 //
+// A VideoStreaming interface names its data endpoint a second time, in its
+// class-specific input (or output) header, and a UVC host goes by that
+// copy: Windows' usbvideo.sys looks for the pipe the header names. So when
+// the video endpoint moves, the header moves with it. Missed, every standard
+// descriptor is right and the camera still enumerates and binds, but no
+// application can open it ("Could not RenderStream to connect pins" from
+// DirectShow) unless the costume happens to put the endpoint back on the
+// number the build gave it, as wearing all six functions does (usbif#78).
+//
 // The audio data endpoint also takes its interval for the speed.
 //
 // On TinyUSB 0.19 and later it is 1 at both speeds: a packet every
@@ -308,6 +322,8 @@ static void usbif_renumber_endpoints(uint8_t *buf, uint16_t total, uint16_t bulk
     uint8_t cur_class = 0;
     uint8_t cur_subclass = 0;
     uint8_t audio_pair = 0;     // number reserved for a feedback endpoint, 0 if none
+    uint8_t *vs_header = NULL;  // the current VideoStreaming interface's header
+    uint8_t vs_itf = 0xFF;
     for (uint16_t o = TUD_CONFIG_DESC_LEN;
          o + 2u <= total && buf[o] >= 2 && o + buf[o] <= total;
          o = (uint16_t)(o + buf[o])) {
@@ -316,11 +332,24 @@ static void usbif_renumber_endpoints(uint8_t *buf, uint16_t total, uint16_t bulk
             cur_class = d[5];
             cur_subclass = d[6];
             audio_pair = 0;
+            // The header sits in alternate setting 0 and the endpoint in a
+            // later one, so it is kept across alternates of one interface.
+            if (d[2] != vs_itf) {
+                vs_header = NULL;
+                vs_itf = d[2];
+            }
+            continue;
+        }
+        if (d[1] == TUSB_DESC_CS_INTERFACE && d[0] >= 7
+            && cur_class == TUSB_CLASS_VIDEO && cur_subclass == USBIF_VIDEO_SUBCLASS_STREAMING
+            && (d[2] == USBIF_VS_INPUT_HEADER || d[2] == USBIF_VS_OUTPUT_HEADER)) {
+            vs_header = d;
             continue;
         }
         if (d[1] != TUSB_DESC_ENDPOINT || d[0] < 7) {
             continue;
         }
+        const uint8_t old_addr = d[2];
         const bool in = (d[2] & 0x80) != 0;
         const uint8_t xfer = d[3] & 0x03;
         uint8_t num;
@@ -350,6 +379,9 @@ static void usbif_renumber_endpoints(uint8_t *buf, uint16_t total, uint16_t bulk
             num = next_out++;
         }
         d[2] = (uint8_t)((in ? 0x80 : 0x00) | num);
+        if (vs_header != NULL && cur_class == TUSB_CLASS_VIDEO && vs_header[6] == old_addr) {
+            vs_header[6] = d[2];   // bEndpointAddress, UVC 1.5 tables 3-14 and 3-15
+        }
         if (xfer == TUSB_XFER_BULK && bulk_mps) {
             d[4] = (uint8_t)(bulk_mps & 0xFF);
             d[5] = (uint8_t)(bulk_mps >> 8);
@@ -531,6 +563,12 @@ int usbif_desc_check(void) {
     bool any_itf = false;
     uint16_t off = TUD_CONFIG_DESC_LEN;
     uint8_t cur_class = 0;
+    uint8_t cur_subclass = 0;
+    uint8_t cur_itf = 0;
+    // A VideoStreaming header's endpoint, until an endpoint descriptor of
+    // the same interface turns up with that address. 0 when none is owed.
+    uint8_t vs_owed_ep = 0;
+    uint8_t vs_owed_itf = 0;
 
     while (off < total) {
         const uint8_t *d = usbif_desc_buf + off;
@@ -554,7 +592,12 @@ int usbif_desc_check(void) {
                     highest_itf = d[2];
                 }
                 any_itf = true;
+                if (vs_owed_ep != 0 && d[2] != vs_owed_itf) {
+                    return -21;         // video header names an endpoint its interface lacks
+                }
                 cur_class = d[5];
+                cur_subclass = d[6];
+                cur_itf = d[2];
                 break;
             case TUSB_DESC_INTERFACE_ASSOCIATION:
                 if (dlen < 8) {
@@ -587,6 +630,9 @@ int usbif_desc_check(void) {
                     return -20;         // endpoint address used twice
                 }
                 seen_ep[slot] = 1;
+                if (vs_owed_ep != 0 && cur_itf == vs_owed_itf && d[2] == vs_owed_ep) {
+                    vs_owed_ep = 0;
+                }
                 break;
             }
             case TUSB_DESC_CS_INTERFACE:
@@ -600,6 +646,14 @@ int usbif_desc_check(void) {
                         && (d[3] >= sizeof(seen_itf) || d[4] >= sizeof(seen_itf))) {
                         return -9;
                     }
+                } else if (cur_class == TUSB_CLASS_VIDEO
+                           && cur_subclass == USBIF_VIDEO_SUBCLASS_STREAMING && dlen >= 7
+                           && (d[2] == USBIF_VS_INPUT_HEADER || d[2] == USBIF_VS_OUTPUT_HEADER)
+                           && d[6] != 0) {
+                    // The host opens the pipe this names, so an endpoint of
+                    // this interface must carry the same address (usbif#78).
+                    vs_owed_ep = d[6];
+                    vs_owed_itf = cur_itf;
                 } else if (cur_class == TUSB_CLASS_AUDIO && dlen >= 9 && d[2] == 0x01
                            && d[3] == 0x00 && d[4] == 0x01) {
                     const uint8_t n = d[7];
@@ -618,6 +672,9 @@ int usbif_desc_check(void) {
 
     if (off != total) {
         return -11;                     // descriptors do not tile wTotalLength
+    }
+    if (vs_owed_ep != 0) {
+        return -21;                     // video header names an endpoint its interface lacks
     }
     if (!any_itf) {
         return -12;                     // a configuration with no interfaces
