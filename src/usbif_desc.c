@@ -455,13 +455,16 @@ static void usbif_build_desc(void) {
     // costumes would share one, and a host that cached drivers against the
     // first would meet fourteen impostors. So the same bitmap is computed
     // from the functions actually being advertised, extended with the audio
-    // bit the upstream macro leaves commented out.
+    // bit the upstream macro leaves commented out, and a video bit, without
+    // which a costume with the camera shared its product id with the same
+    // costume without one (cdc+uvc enumerated as bare CDC's 0x4001).
     usbif_desc_dev.idProduct = (uint16_t)(0x4000
         | ((usbif_fn_enabled & USBIF_FN_CDC) ? (1u << 0) : 0)
         | ((usbif_fn_enabled & USBIF_FN_MSC) ? (1u << 1) : 0)
         | ((usbif_fn_enabled & USBIF_FN_HID) ? (1u << 2) : 0)
         | ((usbif_fn_enabled & USBIF_FN_MIDI) ? (1u << 3) : 0)
-        | ((usbif_fn_enabled & USBIF_FN_AUDIO) ? (1u << 4) : 0));
+        | ((usbif_fn_enabled & USBIF_FN_AUDIO) ? (1u << 4) : 0)
+        | ((usbif_fn_enabled & USBIF_FN_VIDEO) ? (1u << 5) : 0));
 }
 
 const uint8_t *mp_usbd_builtin_desc_cfg_get(void) {

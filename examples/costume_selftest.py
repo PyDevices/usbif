@@ -5,6 +5,9 @@
 # from zero, bNumInterfaces agrees with the content, every sibling
 # reference the assembler rewrote lands on an interface that exists, and
 # the device class agrees with whether any interface association survived.
+# Each costume must also have a product id of its own: a host remembers the
+# drivers it bound against a VID:PID, so two costumes sharing one meet each
+# other's drivers.
 #
 # A host finds these faults by refusing the device -- days later, with no
 # explanation. This finds them in microseconds and names which one.
@@ -55,6 +58,7 @@ def main():
     # well-formed, just not wearable here, and are reported apart from
     # faults. On the P4 (IN endpoints 1..7) every costume fits.
     unwearable = []
+    pids = {}
     try:
         for combo in range(1, 1 << len(built)):
             names = [n for i, n in enumerate(built) if combo & (1 << i)]
@@ -67,11 +71,18 @@ def main():
                 continue
             code = dev.desc_check()
             checked += 1
-            if code != 0:
-                failed += 1
+            name = "+".join(names)
+            bad = code != 0
+            if bad:
                 print("FAIL {:<24} {}".format(
-                    "+".join(names),
-                    FAULTS.get(code, "unknown fault {}".format(code))))
+                    name, FAULTS.get(code, "unknown fault {}".format(code))))
+            pid = dev.pid()
+            if pid in pids:
+                bad = True
+                print("FAIL {:<24} product id 0x{:04x} is also {}'s".format(name, pid, pids[pid]))
+            else:
+                pids[pid] = name
+            failed += bad
     finally:
         dev.functions(*restore)
     print("costume self-test: {} checked, {} failed, {} over this chip's endpoint budget".format(
