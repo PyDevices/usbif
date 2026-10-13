@@ -12,8 +12,9 @@ on the boards people actually use.
 
 ## MIDI
 
-- USB MIDI moves onto pydevices' `mididev`: usbif supplies the USB device and
-  host ports, and the port contract and desktop MIDI backends move there.
+- USB MIDI gives byte-stream ports that CircuitPython's `adafruit_midi` reads,
+  on the device side by extending MicroPython's `usb-device-midi`. usbif's own
+  MIDI port class and parser retire.
 
 ## Closer to MicroPython
 
