@@ -136,13 +136,16 @@ def main():
 
     phase = 0
     sent = 0
-    t0 = time.ticks_ms()
+    # The rate counts from the first frame a host takes, and starts again
+    # each time a host opens the camera, so time spent waiting isn't in it.
+    t0 = None
     try:
         while True:
             # streaming() and ready() answer different questions and want
             # opposite responses: nobody watching means idle cheaply, while
             # watching-but-busy means come straight back.
             if not dev.uvc_streaming():
+                t0 = None
                 time.sleep_ms(50)
                 continue
             if not dev.uvc_ready():
@@ -161,10 +164,13 @@ def main():
                     frame_mv[y * row_bytes:(y + 1) * row_bytes] = row
                 phase = (phase + 2) % width
 
+            if t0 is None:
+                t0 = time.ticks_ms()
+                sent = 0
             dev.uvc_submit(frame)
             sent += 1
             if sent % 50 == 0:
-                dt = time.ticks_diff(time.ticks_ms(), t0)
+                dt = max(1, time.ticks_diff(time.ticks_ms(), t0))
                 print("%d frames, %.1f fps, stats %r"
                       % (sent, sent * 1000 / dt, dev.uvc_stats()))
     except KeyboardInterrupt:
